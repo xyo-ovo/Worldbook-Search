@@ -5,7 +5,7 @@ const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 
 // ---------- 字段识别 ----------
 const FIELD_HINTS = {
-    comment: ['comment', '备注', '标题', 'title', 'name'],
+    comment: ['comment', '备注', '标题', '备忘录', 'title'],
     key: ['key', 'keys', '关键词', '关键字', '触发'],
     content: ['content', '内容', '正文'],
 };
@@ -19,6 +19,9 @@ const FIELD_LABELS = {
 
 const FIELD_ORDER = ['comment', 'key', 'content', 'other'];
 
+const IGNORE_TYPES = ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'hidden', 'image'];
+const IGNORE_NAMES = ['depth', 'order', 'probability', 'weight', 'position', 'index', 'uid', 'scan_depth', 'token_budget'];
+
 const MAX_RESULTS = 300;
 const MAX_SNIPPETS_PER_ENTRY = 3;
 const SNIPPET_RADIUS = 44;
@@ -29,7 +32,7 @@ const expandedUids = new Set();
 
 // ---------- 入口 ----------
 jQuery(async () => {
-    log('v2.1.0 加载中...');
+    log('v2.2.0 加载中...');
 
     setInterval(tryInject, 800);
 
@@ -149,30 +152,103 @@ function injectUI(entriesContainer) {
     log('UI 注入完成 ✨');
 }
 
-// ---------- 读取原生条目 ----------
-function getEntries() {
-    return Array.from(document.querySelectorAll('#world_popup_entries_list .world_entry'));
+// ---------- 找到世界书面板的根容器 ----------
+function getPanelRoot() {
+    const list = document.getElementById('world_popup_entries_list');
+    if (!list) return null;
+
+    const base = list.querySelectorAll('textarea, input').length;
+    let node = list;
+
+    for (let i = 0; i < 5; i++) {
+        const p = node.parentElement;
+        if (!p || p === document.body || p === document.documentElement) break;
+        const cnt = p.querySelectorAll('textarea, input').length;
+        if (cnt > base) return p;
+        node = p;
+    }
+    return list;
 }
 
-function collectInputs(entry) {
-    return Array.from(entry.querySelectorAll('textarea, input'))
-        .filter(el => !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file', 'hidden'].includes(el.type));
-}
-
-// 属性猜不出来时的兜底：按元素类型 + 长度猜
-function heuristicField(el) {
-    if (el.tagName === 'INPUT') return 'comment';
-    if (el.tagName === 'TEXTAREA') {
-        const len = (el.value || '').length;
-        return len >= 150 ? 'content' : 'key';
+// ---------- 找元素所属的 uid ----------
+function findUid(el, root) {
+    let n = el;
+    let depth = 0;
+    while (n && n !== root && depth < 12) {
+        if (n.getAttribute) {
+            const u = n.getAttribute('uid');
+            if (u) return u;
+        }
+        n = n.parentElement;
+        depth++;
     }
     return null;
 }
 
+// ---------- 分组：按 uid 把输入框归到条目 ----------
+function buildGroups() {
+    const root = getPanelRoot();
+    if (!root) return [];
+
+    const nodes = Array.from(root.querySelectorAll('textarea, input'))
+        .filter(el => !IGNORE_TYPES.includes((el.type || '').toLowerCase()));
+
+    const map = new Map();
+    let lastUid = null;
+
+    nodes.forEach((el, idx) => {
+        let uid = findUid(el, root);
+        if (uid) {
+            lastUid = uid;
+        } else {
+            uid = lastUid;
+        }
+        if (!uid) uid = '__g' + idx;
+
+        if (!map.has(uid)) map.set(uid, { uid, inputs: [], first: idx });
+        map.get(uid).inputs.push(el);
+    });
+
+    const groups = Array.from(map.values()).sort((a, b) => a.first - b.first);
+
+    const entryNodes = new Map();
+    root.querySelectorAll('.world_entry[uid]').forEach(e => {
+        entryNodes.set(e.getAttribute('uid'), e);
+    });
+    groups.forEach(g => {
+        g.node = entryNodes.get(g.uid) || null;
+    });
+
+    return groups;
+}
+
+// ---------- 字段猜测 ----------
+function heuristicField(el) {
+    const tag = el.tagName;
+
+    if (tag === 'INPUT') {
+        const t = (el.type || 'text').toLowerCase();
+        if (t === 'number' || t === 'tel') return 'ignore';
+        return 'comment';
+    }
+
+    if (tag === 'TEXTAREA') {
+        const len = (el.value || '').length;
+        return len >= 150 ? 'content' : 'key';
+    }
+
+    return null;
+}
+
 function guessField(el) {
+    const name = (el.getAttribute('name') || '').toLowerCase();
+    const id = (el.id || '').toLowerCase();
+
+    if (IGNORE_NAMES.includes(name) || IGNORE_NAMES.includes(id)) return 'ignore';
+
     const hay = [
-        el.getAttribute('name'),
-        el.id,
+        name,
+        id,
         el.getAttribute('placeholder'),
         el.getAttribute('data-field'),
         el.getAttribute('data-name'),
@@ -187,48 +263,52 @@ function guessField(el) {
     return heuristicField(el);
 }
 
-function collectEntry(entry) {
+// ---------- 收集条目的可搜索文本 ----------
+function collectEntry(group) {
     const buckets = { comment: [], key: [], content: [], other: [] };
 
-    collectInputs(entry).forEach(el => {
+    group.inputs.forEach(el => {
         const v = (el.value || '').trim();
         if (!v) return;
         const f = guessField(el);
+        if (f === 'ignore') return;
         (f && buckets[f] ? buckets[f] : buckets.other).push(v);
     });
 
-    const text = (entry.textContent || '').replace(/\s+/g, ' ').trim();
+    const node = group.node;
+    const text = node ? (node.textContent || '').replace(/\s+/g, ' ').trim() : '';
     const other = buckets.other.join('\n');
-    const allValues = [
+
+    const all = [
         buckets.comment.join('\n'),
         buckets.key.join('\n'),
         buckets.content.join('\n'),
         other,
     ].filter(Boolean).join('\n');
 
-    // 某个字段没识别到东西时，退回「全部文本」，保证一定搜得到
     return {
-        comment: [buckets.comment.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
-        key: [buckets.key.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
-        content: [buckets.content.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
+        comment: [buckets.comment.join('\n') || all, other, text].filter(Boolean).join('\n'),
+        key: [buckets.key.join('\n') || all, other, text].filter(Boolean).join('\n'),
+        content: [buckets.content.join('\n') || all, other, text].filter(Boolean).join('\n'),
     };
 }
 
-function getFieldText(entry, field) {
-    return collectEntry(entry)[field] || '';
+function getFieldText(group, field) {
+    return collectEntry(group)[field] || '';
 }
 
-function getEntryName(entry) {
-    const inputs = collectInputs(entry);
-    for (const el of inputs) {
+function getEntryName(group) {
+    for (const el of group.inputs) {
         if (guessField(el) === 'comment' && (el.value || '').trim()) {
             return el.value.trim().slice(0, 60);
         }
     }
-    const first = inputs.find(el => (el.value || '').trim());
-    if (first) return first.value.trim().slice(0, 60);
-    const uid = entry.getAttribute('uid');
-    return uid ? `条目 #${uid}` : '未命名条目';
+    for (const el of group.inputs) {
+        if (guessField(el) !== 'ignore' && (el.value || '').trim()) {
+            return el.value.trim().slice(0, 60);
+        }
+    }
+    return group.uid ? `条目 #${group.uid}` : '未命名条目';
 }
 
 // ---------- 片段 ----------
@@ -280,7 +360,7 @@ function renderSnippet(sn, field) {
 }
 
 // ---------- 编辑区 ----------
-function buildEditor(entry) {
+function buildEditor(group) {
     const body = document.createElement('div');
     body.className = 'wb-result-body';
 
@@ -288,10 +368,12 @@ function buildEditor(entry) {
     editor.className = 'wb-editor';
 
     const groups = new Map();
-    collectInputs(entry).forEach(el => {
-        const f = guessField(el) || 'other';
-        if (!groups.has(f)) groups.set(f, []);
-        groups.get(f).push(el);
+    group.inputs.forEach(el => {
+        const f = guessField(el);
+        if (f === 'ignore') return;
+        const key = f || 'other';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(el);
     });
 
     let count = 0;
@@ -346,7 +428,7 @@ function buildEditor(entry) {
 
 // ---------- 搜索 ----------
 function runSearch() {
-    const entries = getEntries();
+    const groups = buildGroups();
     const kw = searchText.trim();
     const fields = Object.keys(activeFields).filter(f => activeFields[f]);
 
@@ -358,7 +440,7 @@ function runSearch() {
 
     if (!kw) {
         resultsBox.style.display = 'none';
-        if (counter) counter.textContent = `共 ${entries.length} 条`;
+        if (counter) counter.textContent = `共 ${groups.length} 条`;
         return;
     }
 
@@ -366,14 +448,12 @@ function runSearch() {
     let hits = 0;
     let rendered = 0;
 
-    for (const entry of entries) {
-        const uid = entry.getAttribute('uid') || '';
-
+    for (const group of groups) {
         const matchedFields = [];
         const texts = {};
 
         for (const f of fields) {
-            const t = getFieldText(entry, f);
+            const t = getFieldText(group, f);
             if (t.toLowerCase().includes(kwLower)) {
                 matchedFields.push(f);
                 texts[f] = t;
@@ -386,13 +466,13 @@ function runSearch() {
         if (rendered >= MAX_RESULTS) continue;
         rendered++;
 
-        resultsBox.appendChild(buildResultItem(entry, uid, matchedFields, texts, kw));
+        resultsBox.appendChild(buildResultItem(group, matchedFields, texts, kw));
     }
 
     resultsBox.style.display = 'flex';
 
     if (counter) {
-        counter.textContent = `命中 ${hits} / ${entries.length}`;
+        counter.textContent = `命中 ${hits} / ${groups.length}`;
         counter.title = rendered < hits ? `结果过多，只显示前 ${rendered} 条` : '';
     }
 
@@ -409,7 +489,8 @@ function runSearch() {
     }
 }
 
-function buildResultItem(entry, uid, matchedFields, texts, kw) {
+function buildResultItem(group, matchedFields, texts, kw) {
+    const uid = group.uid;
     const item = document.createElement('div');
     item.className = 'wb-result-item';
     item.dataset.uid = uid;
@@ -423,7 +504,7 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
 
     const name = document.createElement('span');
     name.className = 'wb-result-name';
-    name.textContent = getEntryName(entry);
+    name.textContent = getEntryName(group);
     head.appendChild(name);
 
     const tags = document.createElement('span');
@@ -437,7 +518,7 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
     locate.textContent = '⌖';
     locate.addEventListener('click', e => {
         e.stopPropagation();
-        jumpToEntry(uid);
+        jumpToEntry(group);
     });
     head.appendChild(locate);
 
@@ -460,7 +541,7 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
 
     if (expandedUids.has(uid)) {
         item.classList.add('expanded');
-        item.appendChild(buildEditor(entry));
+        item.appendChild(buildEditor(group));
     }
 
     head.addEventListener('click', () => {
@@ -471,7 +552,7 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
         } else {
             expandedUids.add(uid);
             item.classList.add('expanded');
-            item.appendChild(buildEditor(entry));
+            item.appendChild(buildEditor(group));
         }
     });
 
@@ -479,16 +560,20 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
 }
 
 // ---------- 定位 ----------
-function jumpToEntry(uid) {
-    if (!uid) return;
-    const entry = document.querySelector(`#world_popup_entries_list .world_entry[uid="${CSS.escape(uid)}"]`);
-    if (!entry) return;
+function jumpToEntry(group) {
+    const root = getPanelRoot();
+    let node = group.node;
 
-    entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    entry.classList.remove('wb-flash');
-    void entry.offsetWidth;
-    entry.classList.add('wb-flash');
-    setTimeout(() => entry.classList.remove('wb-flash'), 1800);
+    if (!node && root) {
+        node = root.querySelector(`.world_entry[uid="${CSS.escape(group.uid)}"]`);
+    }
+    if (!node) return;
+
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    node.classList.remove('wb-flash');
+    void node.offsetWidth;
+    node.classList.add('wb-flash');
+    setTimeout(() => node.classList.remove('wb-flash'), 1800);
 }
 
 // ---------- 批量替换 ----------
@@ -496,19 +581,21 @@ function doReplace(replacement) {
     const kw = searchText.trim();
     if (!kw) return alert('先在上面输入要搜索的关键词哦～');
 
-    const entries = getEntries();
+    const groups = buildGroups();
     const re = new RegExp(escapeRegExp(kw), 'gi');
 
     let affectedEntries = 0;
     let affectedFields = 0;
 
-    entries.forEach(entry => {
+    groups.forEach(group => {
         let touched = false;
-        collectInputs(entry).forEach(el => {
+        group.inputs.forEach(el => {
             const v = el.value || '';
             if (!v) return;
 
             const f = guessField(el);
+            if (f === 'ignore') return;
+
             const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
             if (!shouldTouch) return;
 
@@ -525,12 +612,14 @@ function doReplace(replacement) {
 
     if (!confirm(`将会修改 ${affectedEntries} 个条目里的 ${affectedFields} 处：\n「${kw}」 → 「${replacement}」\n\n只影响当前打开的世界书，确定继续吗？`)) return;
 
-    entries.forEach(entry => {
-        collectInputs(entry).forEach(el => {
+    groups.forEach(group => {
+        group.inputs.forEach(el => {
             const v = el.value || '';
             if (!v) return;
 
             const f = guessField(el);
+            if (f === 'ignore') return;
+
             const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
             if (!shouldTouch) return;
 
@@ -551,43 +640,38 @@ function doReplace(replacement) {
 // ---------- 诊断 ----------
 function buildDiagnostics() {
     const lines = [];
-    const containers = document.querySelectorAll('#world_popup_entries_list');
-    const entries = getEntries();
+    const list = document.getElementById('world_popup_entries_list');
+    const root = getPanelRoot();
+    const groups = buildGroups();
 
-    lines.push(`=== 容器 ===`);
-    lines.push(`#world_popup_entries_list 数量: ${containers.length}`);
-    containers.forEach((c, i) => {
-        lines.push(`  [${i}] 可见=${c.offsetParent !== null} 条目数=${c.querySelectorAll('.world_entry').length}`);
+    lines.push('=== 容器 ===');
+    lines.push(`#world_popup_entries_list: ${list ? '存在' : '不存在'}`);
+    lines.push(`root: ${root ? (root.id || root.className || root.tagName) : 'null'}`);
+    lines.push(`root 内 textarea/input 总数: ${root ? root.querySelectorAll('textarea, input').length : 0}`);
+
+    lines.push('');
+    lines.push(`=== 分组（共 ${groups.length} 组）===`);
+
+    groups.slice(0, 3).forEach((g, i) => {
+        lines.push(`[${i}] uid=${g.uid} 输入框=${g.inputs.length} 有原生节点=${g.node ? '是' : '否'}`);
+        g.inputs.forEach((el, j) => {
+            const nm = el.getAttribute('name') || '';
+            const ph = el.getAttribute('placeholder') || '';
+            const len = (el.value || '').length;
+            const f = guessField(el);
+            lines.push(`    ${j + 1}. <${el.tagName.toLowerCase()}> name="${nm}" placeholder="${ph}"`);
+            lines.push(`        字段=${f} 长度=${len} 预览: ${(el.value || '').slice(0, 40).replace(/\n/g, ' ')}`);
+        });
     });
 
     lines.push('');
-    lines.push(`=== 条目 ===`);
-    lines.push(`.world_entry 总数: ${entries.length}`);
-
-    const e = entries[0];
-    if (!e) {
-        lines.push('没有找到任何 .world_entry');
-        return lines.join('\n');
+    lines.push('=== 收集结果长度（第一组）===');
+    if (groups[0]) {
+        const c = collectEntry(groups[0]);
+        Object.keys(c).forEach(k => lines.push(`  ${k}: ${c[k].length}`));
+    } else {
+        lines.push('  （没有分组）');
     }
-
-    lines.push(`第一个条目 uid=${e.getAttribute('uid')} 可见=${e.offsetParent !== null}`);
-    lines.push(`  textContent 长度: ${(e.textContent || '').length}`);
-
-    const inputs = collectInputs(e);
-    lines.push('');
-    lines.push(`=== 输入框（${inputs.length} 个）===`);
-    inputs.forEach((el, i) => {
-        lines.push(`  ${i + 1}. <${el.tagName.toLowerCase()}>`);
-        lines.push(`     name="${el.getAttribute('name') || ''}" id="${el.id}"`);
-        lines.push(`     placeholder="${el.getAttribute('placeholder') || ''}"`);
-        lines.push(`     值长度=${(el.value || '').length} 猜测字段=${guessField(el)}`);
-        lines.push(`     值预览: ${(el.value || '').slice(0, 60).replace(/\n/g, ' ')}`);
-    });
-
-    lines.push('');
-    lines.push('=== 收集结果长度 ===');
-    const c = collectEntry(e);
-    Object.keys(c).forEach(k => lines.push(`  ${k}: ${c[k].length}`));
 
     return lines.join('\n');
 }
@@ -595,7 +679,6 @@ function buildDiagnostics() {
 window.wbSearchDebug = function () {
     const txt = buildDiagnostics();
     console.log(txt);
-    log('诊断信息已打印到上方');
     return txt;
 };
 
