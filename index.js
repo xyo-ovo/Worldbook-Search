@@ -3,7 +3,7 @@ import { eventSource, event_types } from '../../../../script.js';
 const MODULE_NAME = 'worldbook-search';
 const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 
-// ---------- 字段识别：靠 name / id / placeholder 里的关键词猜 ----------
+// ---------- 字段识别 ----------
 const FIELD_HINTS = {
     comment: ['comment', '备注', '标题', 'title', 'name'],
     key: ['key', 'keys', '关键词', '触发'],
@@ -14,21 +14,24 @@ const FIELD_LABELS = {
     comment: '备注',
     key: '关键词',
     content: '内容',
+    other: '其他',
 };
 
+const FIELD_ORDER = ['comment', 'key', 'content', 'other'];
+
 // ---------- 参数 ----------
-const MAX_RESULTS = 300;          // 最多渲染多少条结果
-const MAX_SNIPPETS_PER_ENTRY = 4; // 每个条目最多几个片段
-const SNIPPET_RADIUS = 40;        // 片段前后各截多少字
+const MAX_RESULTS = 300;
+const MAX_SNIPPETS_PER_ENTRY = 3;
+const SNIPPET_RADIUS = 44;
 
 // ---------- 状态 ----------
 let searchText = '';
-let syncFilter = false;
 const activeFields = { comment: true, key: true, content: true };
+const expandedUids = new Set();
 
 // ---------- 入口 ----------
 jQuery(async () => {
-    log('插件加载中...');
+    log('v2.0.0 加载中...');
 
     setInterval(tryInject, 800);
 
@@ -51,31 +54,47 @@ function tryInject() {
     injectUI(list);
 }
 
-// ---------- 注入界面 ----------
+// ---------- 界面 ----------
 function injectUI(entriesContainer) {
     const panel = document.createElement('div');
     panel.id = 'wb-search-panel';
     panel.innerHTML = `
-        <div class="wb-search-row">
-            <input id="wb-search-input" class="text_pole" type="text" placeholder="🔍 搜索条目内容（支持备注 / 关键词 / 正文）..." />
-            <span id="wb-search-count" class="wb-search-count"></span>
-            <div id="wb-search-clear" class="menu_button wb-mini-btn" title="清空">✕</div>
-        </div>
-        <div class="wb-search-row wb-search-options">
-            <span class="wb-dim">范围：</span>
-            <label><input type="checkbox" id="wb-f-comment" checked> 备注</label>
-            <label><input type="checkbox" id="wb-f-key" checked> 关键词</label>
-            <label><input type="checkbox" id="wb-f-content" checked> 内容</label>
-            <label class="wb-right"><input type="checkbox" id="wb-sync-filter"> 同时过滤原生列表</label>
-        </div>
-        <div id="wb-search-results"></div>
-        <details id="wb-replace-box">
-            <summary>🔁 批量替换</summary>
-            <div class="wb-search-row" style="margin-top:8px">
-                <input id="wb-replace-input" class="text_pole" type="text" placeholder="替换成..." />
-                <div id="wb-replace-btn" class="menu_button wb-mini-btn">全部替换</div>
+        <div class="wb-bar">
+            <div class="wb-input-wrap">
+                <span class="wb-input-icon">🔍</span>
+                <input id="wb-search-input" type="text" placeholder="搜索条目内容…" autocomplete="off" />
             </div>
-            <div class="wb-dim" style="margin-top:4px">会把当前世界书中匹配字段里的关键词全部替换掉，操作前请确认～</div>
+            <span id="wb-search-count" class="wb-count">共 0 条</span>
+            <div id="wb-search-clear" class="wb-icon-btn" title="清空">✕</div>
+        </div>
+
+        <div class="wb-filters">
+            <label class="wb-chip active" data-field="comment">
+                <input type="checkbox" id="wb-f-comment" checked>
+                <span>备注</span>
+            </label>
+            <label class="wb-chip active" data-field="key">
+                <input type="checkbox" id="wb-f-key" checked>
+                <span>关键词</span>
+            </label>
+            <label class="wb-chip active" data-field="content">
+                <input type="checkbox" id="wb-f-content" checked>
+                <span>内容</span>
+            </label>
+        </div>
+
+        <div id="wb-search-results"></div>
+
+        <details id="wb-replace-box">
+            <summary>批量替换</summary>
+            <div class="wb-bar" style="margin-top:10px">
+                <div class="wb-input-wrap">
+                    <span class="wb-input-icon">↺</span>
+                    <input id="wb-replace-input" type="text" placeholder="替换成…" />
+                </div>
+                <div id="wb-replace-btn" class="wb-action-btn">全部替换</div>
+            </div>
+            <div class="wb-hint">会把当前世界书中匹配字段里的关键词全部替换掉，操作前请确认～</div>
         </details>
     `;
 
@@ -84,26 +103,27 @@ function injectUI(entriesContainer) {
     const input = panel.querySelector('#wb-search-input');
     input.addEventListener('input', debounce(() => {
         searchText = input.value;
+        expandedUids.clear();
         runSearch();
-    }, 150));
+    }, 160));
 
     panel.querySelector('#wb-search-clear').addEventListener('click', () => {
         input.value = '';
         searchText = '';
+        expandedUids.clear();
         runSearch();
         input.focus();
     });
 
     ['comment', 'key', 'content'].forEach(f => {
-        panel.querySelector(`#wb-f-${f}`).addEventListener('change', e => {
-            activeFields[f] = e.target.checked;
+        const chip = panel.querySelector(`.wb-chip[data-field="${f}"]`);
+        const cb = panel.querySelector(`#wb-f-${f}`);
+        cb.addEventListener('change', () => {
+            activeFields[f] = cb.checked;
+            chip.classList.toggle('active', cb.checked);
+            expandedUids.clear();
             runSearch();
         });
-    });
-
-    panel.querySelector('#wb-sync-filter').addEventListener('change', e => {
-        syncFilter = e.target.checked;
-        runSearch();
     });
 
     panel.querySelector('#wb-replace-btn').addEventListener('click', () => {
@@ -112,7 +132,10 @@ function injectUI(entriesContainer) {
 
     const sel = document.getElementById('world_editor_select');
     if (sel && !sel.dataset.wbSearchBound) {
-        sel.addEventListener('change', () => setTimeout(runSearch, 300));
+        sel.addEventListener('change', () => setTimeout(() => {
+            expandedUids.clear();
+            runSearch();
+        }, 300));
         sel.dataset.wbSearchBound = '1';
     }
 
@@ -120,14 +143,14 @@ function injectUI(entriesContainer) {
     log('UI 注入完成 ✨');
 }
 
-// ---------- 条目 & 字段收集 ----------
+// ---------- 读取原生条目 ----------
 function getEntries() {
     return Array.from(document.querySelectorAll('#world_popup_entries_list .world_entry'));
 }
 
 function collectInputs(entry) {
     return Array.from(entry.querySelectorAll('textarea, input'))
-        .filter(el => !['checkbox', 'radio', 'button', 'submit', 'range', 'color'].includes(el.type));
+        .filter(el => !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file', 'hidden'].includes(el.type));
 }
 
 function guessField(el) {
@@ -164,7 +187,6 @@ function collectEntry(entry) {
         comment: [buckets.comment.join('\n'), other, text].filter(Boolean).join('\n'),
         key: [buckets.key.join('\n'), other, text].filter(Boolean).join('\n'),
         content: [buckets.content.join('\n'), other, text].filter(Boolean).join('\n'),
-        all: [buckets.comment, buckets.key, buckets.content, buckets.other, text].flat().join('\n'),
     };
 }
 
@@ -185,7 +207,7 @@ function getEntryName(entry) {
     return uid ? `条目 #${uid}` : '未命名条目';
 }
 
-// ---------- 片段提取 ----------
+// ---------- 片段 ----------
 function findSnippets(text, kw, radius, max) {
     const out = [];
     const flat = text.replace(/\s+/g, ' ');
@@ -217,8 +239,8 @@ function renderSnippet(sn, field) {
     div.className = 'wb-snippet';
 
     const tag = document.createElement('span');
-    tag.className = 'wb-snippet-field';
-    tag.textContent = FIELD_LABELS[field];
+    tag.className = 'wb-snippet-tag';
+    tag.textContent = FIELD_LABELS[field] || field;
     div.appendChild(tag);
 
     div.appendChild(document.createTextNode(sn.before));
@@ -233,19 +255,81 @@ function renderSnippet(sn, field) {
     return div;
 }
 
+// ---------- 编辑区 ----------
+function buildEditor(entry) {
+    const body = document.createElement('div');
+    body.className = 'wb-result-body';
+
+    const editor = document.createElement('div');
+    editor.className = 'wb-editor';
+
+    const groups = new Map();
+    collectInputs(entry).forEach(el => {
+        const f = guessField(el) || 'other';
+        if (!groups.has(f)) groups.set(f, []);
+        groups.get(f).push(el);
+    });
+
+    let count = 0;
+
+    FIELD_ORDER.forEach(f => {
+        const els = groups.get(f);
+        if (!els || !els.length) return;
+
+        els.forEach((el, i) => {
+            count++;
+            const wrap = document.createElement('div');
+            wrap.className = 'wb-edit-group';
+
+            const lab = document.createElement('div');
+            lab.className = 'wb-editor-label';
+            lab.textContent = (FIELD_LABELS[f] || f) + (els.length > 1 ? ` #${i + 1}` : '');
+            wrap.appendChild(lab);
+
+            const isArea = el.tagName === 'TEXTAREA';
+            const field = document.createElement(isArea ? 'textarea' : 'input');
+            field.className = 'wb-edit-field';
+            if (isArea) {
+                const len = (el.value || '').length;
+                field.rows = Math.min(12, Math.max(3, Math.ceil(len / 55)));
+            } else {
+                field.type = 'text';
+            }
+            field.value = el.value || '';
+            field.spellcheck = false;
+
+            field.addEventListener('input', () => {
+                el.value = field.value;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+
+            wrap.appendChild(field);
+            editor.appendChild(wrap);
+        });
+    });
+
+    if (count === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'wb-hint';
+        empty.textContent = '这个条目没有可编辑的输入框 🥲';
+        editor.appendChild(empty);
+    }
+
+    body.appendChild(editor);
+    return body;
+}
+
 // ---------- 搜索 ----------
 function runSearch() {
     const entries = getEntries();
     const kw = searchText.trim();
-    const fields = Object.keys(FIELD_LABELS).filter(f => activeFields[f]);
+    const fields = Object.keys(activeFields).filter(f => activeFields[f]);
 
     const resultsBox = document.getElementById('wb-search-results');
     const counter = document.getElementById('wb-search-count');
-
-    // 清掉上一次的标记
-    entries.forEach(entry => entry.classList.remove('wb-search-hidden'));
-
     if (!resultsBox) return;
+
     resultsBox.innerHTML = '';
 
     if (!kw) {
@@ -272,48 +356,13 @@ function runSearch() {
             }
         }
 
-        if (matchedFields.length === 0) {
-            if (syncFilter) entry.classList.add('wb-search-hidden');
-            continue;
-        }
+        if (matchedFields.length === 0) continue;
 
         hits++;
-
         if (rendered >= MAX_RESULTS) continue;
         rendered++;
 
-        const item = document.createElement('div');
-        item.className = 'wb-result-item';
-        item.dataset.uid = uid;
-
-        const head = document.createElement('div');
-        head.className = 'wb-result-head';
-
-        const name = document.createElement('span');
-        name.className = 'wb-result-name';
-        name.textContent = getEntryName(entry);
-        head.appendChild(name);
-
-        const tags = document.createElement('span');
-        tags.className = 'wb-result-tags';
-        tags.textContent = matchedFields.map(f => FIELD_LABELS[f]).join(' · ');
-        head.appendChild(tags);
-
-        item.appendChild(head);
-
-        let snippetCount = 0;
-        for (const f of matchedFields) {
-            const snips = findSnippets(texts[f], kw, SNIPPET_RADIUS, 2);
-            for (const sn of snips) {
-                if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
-                item.appendChild(renderSnippet(sn, f));
-                snippetCount++;
-            }
-            if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
-        }
-
-        item.addEventListener('click', () => jumpToEntry(uid));
-        resultsBox.appendChild(item);
+        resultsBox.appendChild(buildResultItem(entry, uid, matchedFields, texts, kw));
     }
 
     resultsBox.style.display = 'flex';
@@ -331,15 +380,86 @@ function runSearch() {
     }
 }
 
-// ---------- 跳转定位 ----------
+function buildResultItem(entry, uid, matchedFields, texts, kw) {
+    const item = document.createElement('div');
+    item.className = 'wb-result-item';
+    item.dataset.uid = uid;
+
+    // ---- 头部 ----
+    const head = document.createElement('div');
+    head.className = 'wb-result-head';
+
+    const dot = document.createElement('span');
+    dot.className = 'wb-result-dot';
+    head.appendChild(dot);
+
+    const name = document.createElement('span');
+    name.className = 'wb-result-name';
+    name.textContent = getEntryName(entry);
+    head.appendChild(name);
+
+    const tags = document.createElement('span');
+    tags.className = 'wb-result-tags';
+    tags.textContent = matchedFields.map(f => FIELD_LABELS[f]).join(' · ');
+    head.appendChild(tags);
+
+    const locate = document.createElement('div');
+    locate.className = 'wb-icon-btn small';
+    locate.title = '定位到原生条目';
+    locate.textContent = '⌖';
+    locate.addEventListener('click', e => {
+        e.stopPropagation();
+        jumpToEntry(uid);
+    });
+    head.appendChild(locate);
+
+    item.appendChild(head);
+
+    // ---- 片段 ----
+    const snippetWrap = document.createElement('div');
+    snippetWrap.className = 'wb-snippets';
+
+    let snippetCount = 0;
+    for (const f of matchedFields) {
+        const snips = findSnippets(texts[f], kw, SNIPPET_RADIUS, 2);
+        for (const sn of snips) {
+            if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
+            snippetWrap.appendChild(renderSnippet(sn, f));
+            snippetCount++;
+        }
+        if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
+    }
+    item.appendChild(snippetWrap);
+
+    // ---- 展开状态 ----
+    if (expandedUids.has(uid)) {
+        item.classList.add('expanded');
+        item.appendChild(buildEditor(entry));
+    }
+
+    // ---- 点击展开 ----
+    head.addEventListener('click', () => {
+        if (expandedUids.has(uid)) {
+            expandedUids.delete(uid);
+            item.classList.remove('expanded');
+            item.querySelector('.wb-result-body')?.remove();
+        } else {
+            expandedUids.add(uid);
+            item.classList.add('expanded');
+            item.appendChild(buildEditor(entry));
+        }
+    });
+
+    return item;
+}
+
+// ---------- 定位到原生条目 ----------
 function jumpToEntry(uid) {
     if (!uid) return;
     const entry = document.querySelector(`#world_popup_entries_list .world_entry[uid="${CSS.escape(uid)}"]`);
     if (!entry) return;
 
-    entry.classList.remove('wb-search-hidden');
     entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
     entry.classList.remove('wb-flash');
     void entry.offsetWidth;
     entry.classList.add('wb-flash');
@@ -400,6 +520,7 @@ function doReplace(replacement) {
     });
 
     alert('替换完成啦～记得点一下世界书面板的保存按钮确认哦 ✅');
+    expandedUids.clear();
     runSearch();
 }
 
