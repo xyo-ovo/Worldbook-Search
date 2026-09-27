@@ -37,8 +37,9 @@ https://github.com/xyo-ovo/Worldbook-Search
 
 ## 🔧 更新日志
 
-- **v3.0.0** — **直接读酒馆数据，彻底抛弃 DOM 方案**。改用 `SillyTavern.getContext().loadWorldInfo(name)` 拿到世界书的完整数据（`{ entries: { uid: {...} } }`），每条包含 `comment` / `key[]` / `content`。从此**不受条目折叠、懒渲染、DOM 结构差异影响**；编辑直接改数据对象，用 `saveWorldInfo(name, data, true)` 写回；新增 💾 保存按钮
-- **v2.4.0** — 尝试支持 contenteditable（结果证明该版本 DOM 里根本没有这些控件）
+- **v3.0.1** — **修复面板布局**：改用块级布局 + `flex: 0 0 auto`，解决面板被酒馆父容器 flex 压缩、内容叠在一起 / 上下挤扁的问题；所有子块改用 margin 分隔
+- **v3.0.0** — **直接读酒馆数据**：改用 `SillyTavern.getContext().loadWorldInfo(name)` 拿完整世界书数据，编辑后 `saveWorldInfo` 写回。彻底摆脱 DOM 依赖，不受折叠 / 懒渲染影响
+- **v2.4.0** — 尝试支持 contenteditable
 - **v2.3.0** — 按官方源码重写 DOM 选择器
 - **v2.2.0** — 全局收集输入框并按 uid 归组
 - **v2.1.0** — 字段识别长度启发式 + 🔧 诊断
@@ -51,11 +52,9 @@ https://github.com/xyo-ovo/Worldbook-Search
 
 点搜索面板右上角的 **🔧** 按钮，会显示：
 
-- `context.loadWorldInfo` 有没有
+- `context.loadWorldInfo` / `saveWorldInfo` 有没有
 - 当前选中的世界书名
 - 读到的条目数 + 前 3 条的字段长度
-
-把这段内容截图发给开发者即可定位问题。
 
 （也可以在控制台执行 `wbSearchDebug()`）
 
