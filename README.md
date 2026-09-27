@@ -42,7 +42,8 @@ https://github.com/xyo-ovo/Worldbook-Search
 
 ## 🔧 更新日志
 
-- **v2.3.0** — **按 SillyTavern 官方源码重写选择器**：直接使用 `textarea[name="comment"]` / `name="key"` / `name="content"` 三个标准字段，uid 支持从 `uid` / `data-uid` 属性、`world_entry_content_{uid}` 形式的 id、以及祖先元素三路提取；彻底排除插件自身输入框的干扰
+- **v2.4.0** — **支持 `contenteditable` 元素**：部分改版酒馆的关键词 / 内容不用 `textarea`，而是可编辑 div。现在三种可编辑元素（textarea / input / contenteditable）统一收集，读取用 `value` 或 `innerText`，写入时派发 `input`+`change` 事件同步；只取叶子级 contenteditable，避免外层容器吞掉整页文本
+- **v2.3.0** — 按 SillyTavern 官方源码重写选择器（`textarea[name="comment"/"key"/"content"]`），uid 三路提取
 - **v2.2.0** — 全局收集输入框并按 uid 归组
 - **v2.1.0** — 字段识别新增长度启发式；面板右上角新增 🔧 诊断按钮
 - **v2.0.0** — 彻底重构 UI：独立结果面板 + 面板内直接编辑并同步
@@ -54,9 +55,9 @@ https://github.com/xyo-ovo/Worldbook-Search
 
 点搜索面板右上角的 **🔧** 按钮，会直接展开诊断信息。
 
-重点看两行：
-- `全局 name=comment/key/content 的输入框: N` —— 这个数应该接近「条目数 × 3」
-- 分组详情里有没有 `name="content"` 且长度上千的
+重点看这几行：
+- `候选可编辑元素总数` 以及其中 textarea / input / contenteditable 各有多少
+- 分组详情里有没有长度上千、被识别为 `content` 的元素
 
 把诊断截图发给开发者即可定位问题。
 
