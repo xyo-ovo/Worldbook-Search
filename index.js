@@ -16,9 +16,14 @@ const FIELD_LABELS = {
     content: '内容',
 };
 
+// ---------- 参数 ----------
+const MAX_RESULTS = 300;          // 最多渲染多少条结果
+const MAX_SNIPPETS_PER_ENTRY = 4; // 每个条目最多几个片段
+const SNIPPET_RADIUS = 40;        // 片段前后各截多少字
+
 // ---------- 状态 ----------
 let searchText = '';
-let onlyShowMatches = true;
+let syncFilter = false;
 const activeFields = { comment: true, key: true, content: true };
 
 // ---------- 入口 ----------
@@ -31,7 +36,7 @@ jQuery(async () => {
         eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => setTimeout(tryInject, 300));
     }
 
-    log('诊断命令：控制台输入 wbSearchDebug() 可打印条目结构');
+    log('诊断命令：控制台输入 wbSearchDebug()');
 });
 
 function tryInject() {
@@ -52,7 +57,7 @@ function injectUI(entriesContainer) {
     panel.id = 'wb-search-panel';
     panel.innerHTML = `
         <div class="wb-search-row">
-            <input id="wb-search-input" class="text_pole" type="text" placeholder="🔍 搜索当前世界书的条目..." />
+            <input id="wb-search-input" class="text_pole" type="text" placeholder="🔍 搜索条目内容（支持备注 / 关键词 / 正文）..." />
             <span id="wb-search-count" class="wb-search-count"></span>
             <div id="wb-search-clear" class="menu_button wb-mini-btn" title="清空">✕</div>
         </div>
@@ -61,8 +66,9 @@ function injectUI(entriesContainer) {
             <label><input type="checkbox" id="wb-f-comment" checked> 备注</label>
             <label><input type="checkbox" id="wb-f-key" checked> 关键词</label>
             <label><input type="checkbox" id="wb-f-content" checked> 内容</label>
-            <label class="wb-right"><input type="checkbox" id="wb-only-match" checked> 只显示匹配</label>
+            <label class="wb-right"><input type="checkbox" id="wb-sync-filter"> 同时过滤原生列表</label>
         </div>
+        <div id="wb-search-results"></div>
         <details id="wb-replace-box">
             <summary>🔁 批量替换</summary>
             <div class="wb-search-row" style="margin-top:8px">
@@ -95,8 +101,8 @@ function injectUI(entriesContainer) {
         });
     });
 
-    panel.querySelector('#wb-only-match').addEventListener('change', e => {
-        onlyShowMatches = e.target.checked;
+    panel.querySelector('#wb-sync-filter').addEventListener('change', e => {
+        syncFilter = e.target.checked;
         runSearch();
     });
 
@@ -121,7 +127,7 @@ function getEntries() {
 
 function collectInputs(entry) {
     return Array.from(entry.querySelectorAll('textarea, input'))
-        .filter(el => el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'button' && el.type !== 'submit');
+        .filter(el => !['checkbox', 'radio', 'button', 'submit', 'range', 'color'].includes(el.type));
 }
 
 function guessField(el) {
@@ -166,37 +172,178 @@ function getFieldText(entry, field) {
     return collectEntry(entry)[field] || '';
 }
 
+function getEntryName(entry) {
+    const inputs = collectInputs(entry);
+    for (const el of inputs) {
+        if (guessField(el) === 'comment' && (el.value || '').trim()) {
+            return el.value.trim().slice(0, 60);
+        }
+    }
+    const first = inputs.find(el => (el.value || '').trim());
+    if (first) return first.value.trim().slice(0, 60);
+    const uid = entry.getAttribute('uid');
+    return uid ? `条目 #${uid}` : '未命名条目';
+}
+
+// ---------- 片段提取 ----------
+function findSnippets(text, kw, radius, max) {
+    const out = [];
+    const flat = text.replace(/\s+/g, ' ');
+    const lower = flat.toLowerCase();
+    const k = kw.toLowerCase();
+    if (!k) return out;
+
+    let from = 0;
+    while (out.length < max) {
+        const idx = lower.indexOf(k, from);
+        if (idx === -1) break;
+
+        const start = Math.max(0, idx - radius);
+        const end = Math.min(flat.length, idx + k.length + radius);
+
+        out.push({
+            before: (start > 0 ? '…' : '') + flat.slice(start, idx),
+            hit: flat.slice(idx, idx + k.length),
+            after: flat.slice(idx + k.length, end) + (end < flat.length ? '…' : ''),
+        });
+
+        from = idx + k.length;
+    }
+    return out;
+}
+
+function renderSnippet(sn, field) {
+    const div = document.createElement('div');
+    div.className = 'wb-snippet';
+
+    const tag = document.createElement('span');
+    tag.className = 'wb-snippet-field';
+    tag.textContent = FIELD_LABELS[field];
+    div.appendChild(tag);
+
+    div.appendChild(document.createTextNode(sn.before));
+
+    const mark = document.createElement('mark');
+    mark.className = 'wb-hit';
+    mark.textContent = sn.hit;
+    div.appendChild(mark);
+
+    div.appendChild(document.createTextNode(sn.after));
+
+    return div;
+}
+
 // ---------- 搜索 ----------
 function runSearch() {
     const entries = getEntries();
-    const kw = searchText.trim().toLowerCase();
+    const kw = searchText.trim();
     const fields = Object.keys(FIELD_LABELS).filter(f => activeFields[f]);
-    let hits = 0;
 
-    entries.forEach(entry => {
-        entry.classList.remove('wb-search-hit', 'wb-search-hidden');
-        entry.querySelectorAll('.wb-search-badge').forEach(b => b.remove());
-
-        if (!kw) return;
-
-        const matched = fields.filter(f => getFieldText(entry, f).toLowerCase().includes(kw));
-
-        if (matched.length > 0) {
-            hits++;
-            entry.classList.add('wb-search-hit');
-            const badge = document.createElement('span');
-            badge.className = 'wb-search-badge';
-            badge.textContent = `🔍 ${matched.map(f => FIELD_LABELS[f]).join(' / ')}`;
-            entry.insertBefore(badge, entry.firstChild);
-        } else if (onlyShowMatches) {
-            entry.classList.add('wb-search-hidden');
-        }
-    });
-
+    const resultsBox = document.getElementById('wb-search-results');
     const counter = document.getElementById('wb-search-count');
-    if (counter) {
-        counter.textContent = kw ? `命中 ${hits} / ${entries.length}` : `共 ${entries.length} 条`;
+
+    // 清掉上一次的标记
+    entries.forEach(entry => entry.classList.remove('wb-search-hidden'));
+
+    if (!resultsBox) return;
+    resultsBox.innerHTML = '';
+
+    if (!kw) {
+        resultsBox.style.display = 'none';
+        if (counter) counter.textContent = `共 ${entries.length} 条`;
+        return;
     }
+
+    const kwLower = kw.toLowerCase();
+    let hits = 0;
+    let rendered = 0;
+
+    for (const entry of entries) {
+        const uid = entry.getAttribute('uid') || '';
+
+        const matchedFields = [];
+        const texts = {};
+
+        for (const f of fields) {
+            const t = getFieldText(entry, f);
+            if (t.toLowerCase().includes(kwLower)) {
+                matchedFields.push(f);
+                texts[f] = t;
+            }
+        }
+
+        if (matchedFields.length === 0) {
+            if (syncFilter) entry.classList.add('wb-search-hidden');
+            continue;
+        }
+
+        hits++;
+
+        if (rendered >= MAX_RESULTS) continue;
+        rendered++;
+
+        const item = document.createElement('div');
+        item.className = 'wb-result-item';
+        item.dataset.uid = uid;
+
+        const head = document.createElement('div');
+        head.className = 'wb-result-head';
+
+        const name = document.createElement('span');
+        name.className = 'wb-result-name';
+        name.textContent = getEntryName(entry);
+        head.appendChild(name);
+
+        const tags = document.createElement('span');
+        tags.className = 'wb-result-tags';
+        tags.textContent = matchedFields.map(f => FIELD_LABELS[f]).join(' · ');
+        head.appendChild(tags);
+
+        item.appendChild(head);
+
+        let snippetCount = 0;
+        for (const f of matchedFields) {
+            const snips = findSnippets(texts[f], kw, SNIPPET_RADIUS, 2);
+            for (const sn of snips) {
+                if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
+                item.appendChild(renderSnippet(sn, f));
+                snippetCount++;
+            }
+            if (snippetCount >= MAX_SNIPPETS_PER_ENTRY) break;
+        }
+
+        item.addEventListener('click', () => jumpToEntry(uid));
+        resultsBox.appendChild(item);
+    }
+
+    resultsBox.style.display = 'flex';
+
+    if (counter) {
+        counter.textContent = `命中 ${hits} / ${entries.length}`;
+        counter.title = rendered < hits ? `结果过多，只显示前 ${rendered} 条` : '';
+    }
+
+    if (hits === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'wb-empty';
+        empty.textContent = '没有找到匹配的条目 🥲';
+        resultsBox.appendChild(empty);
+    }
+}
+
+// ---------- 跳转定位 ----------
+function jumpToEntry(uid) {
+    if (!uid) return;
+    const entry = document.querySelector(`#world_popup_entries_list .world_entry[uid="${CSS.escape(uid)}"]`);
+    if (!entry) return;
+
+    entry.classList.remove('wb-search-hidden');
+    entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    entry.classList.remove('wb-flash');
+    void entry.offsetWidth;
+    entry.classList.add('wb-flash');
+    setTimeout(() => entry.classList.remove('wb-flash'), 1800);
 }
 
 // ---------- 批量替换 ----------

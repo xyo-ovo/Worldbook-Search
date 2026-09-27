@@ -55,30 +55,111 @@
     font-size: 0.85em;
 }
 
+/* ---------- 结果列表 ---------- */
+#wb-search-results {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+    padding-right: 4px;
+    border-top: 1px dashed var(--SmartThemeBorderColor);
+    padding-top: 8px;
+}
+
+.wb-result-item {
+    padding: 6px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.wb-result-item:hover {
+    border-color: var(--SmartThemeQuoteColor);
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.wb-result-item:active {
+    transform: scale(0.995);
+}
+
+.wb-result-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 0.9em;
+}
+
+.wb-result-name {
+    font-weight: 600;
+    opacity: 0.95;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wb-result-tags {
+    margin-left: auto;
+    font-size: 0.78em;
+    opacity: 0.55;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.wb-snippet {
+    font-size: 0.84em;
+    opacity: 0.82;
+    margin-top: 4px;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.wb-snippet-field {
+    display: inline-block;
+    font-size: 0.9em;
+    opacity: 0.6;
+    margin-right: 5px;
+    padding: 0 5px;
+    border-radius: 3px;
+    border: 1px solid var(--SmartThemeBorderColor);
+}
+
+/* 命中高亮 —— 像被选中那样 */
+mark.wb-hit {
+    background: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeBodyColor);
+    padding: 0 2px;
+    border-radius: 3px;
+    font-weight: 700;
+    box-shadow: 0 0 0 1px var(--SmartThemeQuoteColor);
+}
+
+.wb-empty {
+    text-align: center;
+    opacity: 0.55;
+    font-size: 0.9em;
+    padding: 12px 0;
+}
+
+/* ---------- 跳到条目时闪一下 ---------- */
+.world_entry.wb-flash {
+    animation: wb-flash-anim 1.8s ease-out;
+}
+
+@keyframes wb-flash-anim {
+    0%   { box-shadow: 0 0 0 3px var(--SmartThemeQuoteColor); }
+    70%  { box-shadow: 0 0 0 3px var(--SmartThemeQuoteColor); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.wb-search-hidden {
+    display: none !important;
+}
+
 #wb-replace-box summary {
     cursor: pointer;
     opacity: 0.75;
     user-select: none;
-}
-
-/* 命中样式 */
-.world_entry.wb-search-hit {
-    box-shadow: inset 3px 0 0 var(--SmartThemeQuoteColor);
-    border-radius: 6px;
-}
-
-.wb-search-badge {
-    display: inline-block;
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 10px;
-    background: var(--SmartThemeQuoteColor);
-    color: var(--SmartThemeBodyColor);
-    margin: 4px 4px 4px 2px;
-    opacity: 0.9;
-}
-
-/* !important 才能盖住别人写的 inline style */
-.wb-search-hidden {
-    display: none !important;
 }
