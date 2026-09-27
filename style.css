@@ -1,6 +1,6 @@
 /* ============================================================
-   World Book Search v2.0.0
-   完全独立的结果面板 —— 不干预原生条目列表
+   World Book Search v2.1.0
+   独立结果面板 + 面板内诊断
    ============================================================ */
 
 #wb-search-panel {
@@ -163,6 +163,35 @@
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
+/* ---------- 诊断 ---------- */
+#wb-diag {
+    display: none;
+    margin: 0;
+    padding: 10px 12px;
+    max-height: 240px;
+    overflow: auto;
+    border-radius: 9px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: rgba(0, 0, 0, 0.3);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72em;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-all;
+    opacity: 0.88;
+    color: var(--SmartThemeBodyColor);
+}
+
+#wb-diag::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+#wb-diag::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.11);
+    border-radius: 3px;
+}
+
 /* ---------- 结果区 ---------- */
 #wb-search-results {
     display: none;
@@ -221,7 +250,6 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
 }
 
-/* ---------- 卡片头部 ---------- */
 .wb-result-head {
     display: flex;
     align-items: center;
@@ -369,7 +397,7 @@ mark.wb-hit {
     text-align: center;
     opacity: 0.45;
     font-size: 0.88em;
-    padding: 18px 0;
+    padding: 18px 0 6px;
     letter-spacing: 0.02em;
 }
 

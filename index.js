@@ -6,7 +6,7 @@ const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 // ---------- 字段识别 ----------
 const FIELD_HINTS = {
     comment: ['comment', '备注', '标题', 'title', 'name'],
-    key: ['key', 'keys', '关键词', '触发'],
+    key: ['key', 'keys', '关键词', '关键字', '触发'],
     content: ['content', '内容', '正文'],
 };
 
@@ -19,27 +19,23 @@ const FIELD_LABELS = {
 
 const FIELD_ORDER = ['comment', 'key', 'content', 'other'];
 
-// ---------- 参数 ----------
 const MAX_RESULTS = 300;
 const MAX_SNIPPETS_PER_ENTRY = 3;
 const SNIPPET_RADIUS = 44;
 
-// ---------- 状态 ----------
 let searchText = '';
 const activeFields = { comment: true, key: true, content: true };
 const expandedUids = new Set();
 
 // ---------- 入口 ----------
 jQuery(async () => {
-    log('v2.0.0 加载中...');
+    log('v2.1.0 加载中...');
 
     setInterval(tryInject, 800);
 
     if (event_types && event_types.WORLDINFO_SETTINGS_UPDATED) {
         eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => setTimeout(tryInject, 300));
     }
-
-    log('诊断命令：控制台输入 wbSearchDebug()');
 });
 
 function tryInject() {
@@ -81,7 +77,10 @@ function injectUI(entriesContainer) {
                 <input type="checkbox" id="wb-f-content" checked>
                 <span>内容</span>
             </label>
+            <div id="wb-diag-btn" class="wb-icon-btn small" title="查看诊断信息" style="margin-left:auto">🔧</div>
         </div>
+
+        <pre id="wb-diag"></pre>
 
         <div id="wb-search-results"></div>
 
@@ -103,14 +102,12 @@ function injectUI(entriesContainer) {
     const input = panel.querySelector('#wb-search-input');
     input.addEventListener('input', debounce(() => {
         searchText = input.value;
-        expandedUids.clear();
         runSearch();
     }, 160));
 
     panel.querySelector('#wb-search-clear').addEventListener('click', () => {
         input.value = '';
         searchText = '';
-        expandedUids.clear();
         runSearch();
         input.focus();
     });
@@ -121,13 +118,22 @@ function injectUI(entriesContainer) {
         cb.addEventListener('change', () => {
             activeFields[f] = cb.checked;
             chip.classList.toggle('active', cb.checked);
-            expandedUids.clear();
             runSearch();
         });
     });
 
     panel.querySelector('#wb-replace-btn').addEventListener('click', () => {
         doReplace(panel.querySelector('#wb-replace-input').value);
+    });
+
+    const diagPre = panel.querySelector('#wb-diag');
+    panel.querySelector('#wb-diag-btn').addEventListener('click', () => {
+        if (diagPre.style.display === 'block') {
+            diagPre.style.display = 'none';
+            return;
+        }
+        diagPre.textContent = buildDiagnostics();
+        diagPre.style.display = 'block';
     });
 
     const sel = document.getElementById('world_editor_select');
@@ -153,6 +159,16 @@ function collectInputs(entry) {
         .filter(el => !['checkbox', 'radio', 'button', 'submit', 'range', 'color', 'file', 'hidden'].includes(el.type));
 }
 
+// 属性猜不出来时的兜底：按元素类型 + 长度猜
+function heuristicField(el) {
+    if (el.tagName === 'INPUT') return 'comment';
+    if (el.tagName === 'TEXTAREA') {
+        const len = (el.value || '').length;
+        return len >= 150 ? 'content' : 'key';
+    }
+    return null;
+}
+
 function guessField(el) {
     const hay = [
         el.getAttribute('name'),
@@ -162,12 +178,13 @@ function guessField(el) {
         el.getAttribute('data-name'),
     ].filter(Boolean).join(' ').toLowerCase();
 
-    if (!hay) return null;
-
-    for (const [field, hints] of Object.entries(FIELD_HINTS)) {
-        if (hints.some(h => hay.includes(h))) return field;
+    if (hay) {
+        for (const [field, hints] of Object.entries(FIELD_HINTS)) {
+            if (hints.some(h => hay.includes(h))) return field;
+        }
     }
-    return null;
+
+    return heuristicField(el);
 }
 
 function collectEntry(entry) {
@@ -182,11 +199,18 @@ function collectEntry(entry) {
 
     const text = (entry.textContent || '').replace(/\s+/g, ' ').trim();
     const other = buckets.other.join('\n');
+    const allValues = [
+        buckets.comment.join('\n'),
+        buckets.key.join('\n'),
+        buckets.content.join('\n'),
+        other,
+    ].filter(Boolean).join('\n');
 
+    // 某个字段没识别到东西时，退回「全部文本」，保证一定搜得到
     return {
-        comment: [buckets.comment.join('\n'), other, text].filter(Boolean).join('\n'),
-        key: [buckets.key.join('\n'), other, text].filter(Boolean).join('\n'),
-        content: [buckets.content.join('\n'), other, text].filter(Boolean).join('\n'),
+        comment: [buckets.comment.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
+        key: [buckets.key.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
+        content: [buckets.content.join('\n') || allValues, other, text].filter(Boolean).join('\n'),
     };
 }
 
@@ -376,7 +400,12 @@ function runSearch() {
         const empty = document.createElement('div');
         empty.className = 'wb-empty';
         empty.textContent = '没有找到匹配的条目 🥲';
+        const tip = document.createElement('div');
+        tip.className = 'wb-hint';
+        tip.style.textAlign = 'center';
+        tip.textContent = '搜不到？点右上角 🔧 查看诊断信息';
         resultsBox.appendChild(empty);
+        resultsBox.appendChild(tip);
     }
 }
 
@@ -385,7 +414,6 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
     item.className = 'wb-result-item';
     item.dataset.uid = uid;
 
-    // ---- 头部 ----
     const head = document.createElement('div');
     head.className = 'wb-result-head';
 
@@ -415,7 +443,6 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
 
     item.appendChild(head);
 
-    // ---- 片段 ----
     const snippetWrap = document.createElement('div');
     snippetWrap.className = 'wb-snippets';
 
@@ -431,13 +458,11 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
     }
     item.appendChild(snippetWrap);
 
-    // ---- 展开状态 ----
     if (expandedUids.has(uid)) {
         item.classList.add('expanded');
         item.appendChild(buildEditor(entry));
     }
 
-    // ---- 点击展开 ----
     head.addEventListener('click', () => {
         if (expandedUids.has(uid)) {
             expandedUids.delete(uid);
@@ -453,7 +478,7 @@ function buildResultItem(entry, uid, matchedFields, texts, kw) {
     return item;
 }
 
-// ---------- 定位到原生条目 ----------
+// ---------- 定位 ----------
 function jumpToEntry(uid) {
     if (!uid) return;
     const entry = document.querySelector(`#world_popup_entries_list .world_entry[uid="${CSS.escape(uid)}"]`);
@@ -520,33 +545,58 @@ function doReplace(replacement) {
     });
 
     alert('替换完成啦～记得点一下世界书面板的保存按钮确认哦 ✅');
-    expandedUids.clear();
     runSearch();
 }
 
 // ---------- 诊断 ----------
-window.wbSearchDebug = function () {
+function buildDiagnostics() {
+    const lines = [];
+    const containers = document.querySelectorAll('#world_popup_entries_list');
     const entries = getEntries();
-    log(`找到 ${entries.length} 个 .world_entry`);
+
+    lines.push(`=== 容器 ===`);
+    lines.push(`#world_popup_entries_list 数量: ${containers.length}`);
+    containers.forEach((c, i) => {
+        lines.push(`  [${i}] 可见=${c.offsetParent !== null} 条目数=${c.querySelectorAll('.world_entry').length}`);
+    });
+
+    lines.push('');
+    lines.push(`=== 条目 ===`);
+    lines.push(`.world_entry 总数: ${entries.length}`);
 
     const e = entries[0];
-    if (!e) return log('没有找到任何条目');
+    if (!e) {
+        lines.push('没有找到任何 .world_entry');
+        return lines.join('\n');
+    }
 
-    log('第一个条目的 outerHTML（截断 4000 字）:');
-    console.log(e.outerHTML.slice(0, 4000));
+    lines.push(`第一个条目 uid=${e.getAttribute('uid')} 可见=${e.offsetParent !== null}`);
+    lines.push(`  textContent 长度: ${(e.textContent || '').length}`);
 
-    log('识别到的输入控件:');
-    console.table(collectInputs(e).map(el => ({
-        tag: el.tagName,
-        name: el.getAttribute('name'),
-        id: el.id,
-        placeholder: el.getAttribute('placeholder'),
-        猜测字段: guessField(el),
-        值: (el.value || '').slice(0, 40),
-    })));
+    const inputs = collectInputs(e);
+    lines.push('');
+    lines.push(`=== 输入框（${inputs.length} 个）===`);
+    inputs.forEach((el, i) => {
+        lines.push(`  ${i + 1}. <${el.tagName.toLowerCase()}>`);
+        lines.push(`     name="${el.getAttribute('name') || ''}" id="${el.id}"`);
+        lines.push(`     placeholder="${el.getAttribute('placeholder') || ''}"`);
+        lines.push(`     值长度=${(el.value || '').length} 猜测字段=${guessField(el)}`);
+        lines.push(`     值预览: ${(el.value || '').slice(0, 60).replace(/\n/g, ' ')}`);
+    });
 
-    log('收集到的字段文本:');
-    console.log(collectEntry(e));
+    lines.push('');
+    lines.push('=== 收集结果长度 ===');
+    const c = collectEntry(e);
+    Object.keys(c).forEach(k => lines.push(`  ${k}: ${c[k].length}`));
+
+    return lines.join('\n');
+}
+
+window.wbSearchDebug = function () {
+    const txt = buildDiagnostics();
+    console.log(txt);
+    log('诊断信息已打印到上方');
+    return txt;
 };
 
 // ---------- 工具 ----------
