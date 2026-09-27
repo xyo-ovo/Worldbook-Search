@@ -4,54 +4,61 @@ const MODULE_NAME = 'worldbook-search';
 const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 
 // ============================================================
-// v2.4.0
-// 支持三种可编辑元素：
-//   - <textarea>                （备注通常是这个）
-//   - <input type="text">       （少数版本）
-//   - <div contenteditable>     （部分改版酒馆的关键词 / 内容用这个）
+// v3.0.0 —— 直接读酒馆的数据，不再依赖 DOM
+//
+// 依据 SillyTavern 官方源码 public/scripts/st-context.js：
+//   context.loadWorldInfo(name)   → { entries: { "0": {...}, "7": {...} } }
+//   context.saveWorldInfo(name, data, immediately)
+//   context.getWorldInfoNames()
+//
+// 每条 entry 结构：
+//   { uid, comment, key: [], content, depth, order, probability, disable, ... }
 // ============================================================
 
-const FIELD_HINTS = {
-    comment: ['comment', '备注', '标题', '备忘录', 'title'],
-    key: ['key', 'keys', '关键词', '关键字', '触发'],
-    content: ['content', '内容', '正文'],
-};
-
-const FIELD_LABELS = {
-    comment: '备注',
-    key: '关键词',
-    content: '内容',
-    other: '其他',
-};
-
-const FIELD_ORDER = ['comment', 'key', 'content', 'other'];
-
-const IGNORE_TYPES = ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'hidden', 'image'];
-
-const IGNORE_NAMES = [
-    'depth', 'order', 'probability', 'weight', 'position', 'index', 'uid',
-    'scan_depth', 'token_budget', 'role', 'group_weight', 'sticky',
-    'cooldown', 'delay', 'search', 'replace', 'wb-search-input', 'wb-replace-input',
-];
+const FIELD_LABELS = { comment: '备注', key: '关键词', content: '内容' };
+const FIELD_ORDER = ['comment', 'key', 'content'];
 
 const MAX_RESULTS = 300;
 const MAX_SNIPPETS_PER_ENTRY = 3;
 const SNIPPET_RADIUS = 44;
 
 let searchText = '';
+let ctx = null;
 const activeFields = { comment: true, key: true, content: true };
 const expandedUids = new Set();
 
+const state = {
+    bookName: null,
+    bookData: null,
+    dirty: false,
+};
+
 // ---------- 入口 ----------
 jQuery(async () => {
-    log('v2.4.0 加载中...');
+    log('v3.0.0 加载中...');
 
     setInterval(tryInject, 800);
 
     if (event_types && event_types.WORLDINFO_SETTINGS_UPDATED) {
-        eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => setTimeout(tryInject, 300));
+        eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => {
+            state.bookName = null;
+            state.bookData = null;
+            setTimeout(tryInject, 300);
+        });
     }
 });
+
+function getCtx() {
+    if (!ctx) {
+        try {
+            ctx = SillyTavern.getContext();
+        } catch (e) {
+            log('getContext 失败', e);
+            ctx = null;
+        }
+    }
+    return ctx;
+}
 
 function tryInject() {
     const list = document.getElementById('world_popup_entries_list');
@@ -73,7 +80,7 @@ function injectUI(entriesContainer) {
         <div class="wb-bar">
             <div class="wb-input-wrap">
                 <span class="wb-input-icon">🔍</span>
-                <input id="wb-search-input" type="text" placeholder="搜索条目内容…" autocomplete="off" />
+                <input id="wb-search-input" type="text" placeholder="搜索条目内容（备注 / 关键词 / 正文）…" autocomplete="off" />
             </div>
             <span id="wb-search-count" class="wb-count">共 0 条</span>
             <div id="wb-search-clear" class="wb-icon-btn" title="清空">✕</div>
@@ -92,7 +99,8 @@ function injectUI(entriesContainer) {
                 <input type="checkbox" id="wb-f-content" checked>
                 <span>内容</span>
             </label>
-            <div id="wb-diag-btn" class="wb-icon-btn small" title="查看诊断信息" style="margin-left:auto">🔧</div>
+            <div id="wb-save-btn" class="wb-save-btn" title="保存到酒馆">💾 保存</div>
+            <div id="wb-diag-btn" class="wb-icon-btn small" title="查看诊断信息">🔧</div>
         </div>
 
         <pre id="wb-diag"></pre>
@@ -108,7 +116,7 @@ function injectUI(entriesContainer) {
                 </div>
                 <div id="wb-replace-btn" class="wb-action-btn">全部替换</div>
             </div>
-            <div class="wb-hint">会把当前世界书中匹配字段里的关键词全部替换掉，操作前请确认～</div>
+            <div class="wb-hint">会直接改世界书数据。改完记得点 💾 保存～</div>
         </details>
     `;
 
@@ -137,6 +145,15 @@ function injectUI(entriesContainer) {
         });
     });
 
+    panel.querySelector('#wb-save-btn').addEventListener('click', async () => {
+        const ok = await saveBook();
+        if (ok) {
+            toast('已保存到酒馆 ✅');
+        } else {
+            toast('保存失败 😿 看下控制台');
+        }
+    });
+
     panel.querySelector('#wb-replace-btn').addEventListener('click', () => {
         doReplace(panel.querySelector('#wb-replace-input').value);
     });
@@ -154,6 +171,9 @@ function injectUI(entriesContainer) {
     const sel = document.getElementById('world_editor_select');
     if (sel && !sel.dataset.wbSearchBound) {
         sel.addEventListener('change', () => setTimeout(() => {
+            state.bookName = null;
+            state.bookData = null;
+            state.dirty = false;
             expandedUids.clear();
             runSearch();
         }, 300));
@@ -164,251 +184,117 @@ function injectUI(entriesContainer) {
     log('UI 注入完成 ✨');
 }
 
-// ---------- 基础工具 ----------
-function isInOwnPanel(el) {
-    const panel = document.getElementById('wb-search-panel');
-    return !!(panel && panel.contains(el));
+// ---------- 世界书数据 ----------
+function getCurrentBookName() {
+    const sel = document.getElementById('world_editor_select');
+    if (!sel || sel.selectedIndex < 0) return null;
+    const opt = sel.options[sel.selectedIndex];
+    const t = opt ? String(opt.text || '').trim() : '';
+    if (!t || /select world/i.test(t)) return null;
+    return t;
 }
 
-function isNativeInput(el) {
-    return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
-}
+async function loadBook(force) {
+    const c = getCtx();
+    if (!c || typeof c.loadWorldInfo !== 'function') return null;
 
-function readVal(el) {
-    if (isNativeInput(el)) return el.value || '';
-    return el.innerText || el.textContent || '';
-}
+    const name = getCurrentBookName();
+    if (!name) return null;
 
-function writeVal(el, v) {
-    if (isNativeInput(el)) {
-        el.value = v;
-    } else {
-        el.innerText = v;
+    if (!force && state.bookName === name && state.bookData) return state.bookData;
+
+    try {
+        const data = await c.loadWorldInfo(name);
+        state.bookName = name;
+        state.bookData = data;
+        state.dirty = false;
+        return data;
+    } catch (e) {
+        log('loadWorldInfo 失败', e);
+        return null;
     }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-function isEditable(el) {
-    if (!el || el.nodeType !== 1) return false;
-    if (isInOwnPanel(el)) return false;
+function getEntries() {
+    const data = state.bookData;
+    if (!data || !data.entries) return [];
+    const raw = data.entries;
+    const list = Array.isArray(raw) ? raw.slice() : Object.values(raw);
+    return list.filter(e => e && typeof e === 'object');
+}
 
-    const tag = el.tagName;
-
-    if (tag === 'TEXTAREA') return true;
-
-    if (tag === 'INPUT') {
-        const t = (el.type || 'text').toLowerCase();
-        return !IGNORE_TYPES.includes(t);
+function fieldTextOf(entry, field) {
+    if (field === 'comment') return entry.comment || '';
+    if (field === 'content') return entry.content || '';
+    if (field === 'key') {
+        const k = entry.key;
+        if (Array.isArray(k)) return k.join(', ');
+        return k ? String(k) : '';
     }
+    return '';
+}
 
-    if (el.isContentEditable) {
-        // 只取「叶子级」的 contenteditable，避免外层大容器把整页文本都吞进来
-        const inners = Array.from(el.querySelectorAll('[contenteditable]'));
-        if (inners.some(x => x.isContentEditable)) return false;
+function setFieldValue(entry, field, value) {
+    if (field === 'comment') {
+        entry.comment = value;
+    } else if (field === 'content') {
+        entry.content = value;
+    } else if (field === 'key') {
+        entry.key = String(value)
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+    state.dirty = true;
+    markDirty();
+}
+
+function markDirty() {
+    const btn = document.getElementById('wb-save-btn');
+    if (!btn) return;
+    btn.classList.toggle('dirty', state.dirty);
+}
+
+async function saveBook() {
+    const c = getCtx();
+    if (!c || typeof c.saveWorldInfo !== 'function') return false;
+    if (!state.bookName || !state.bookData) return false;
+
+    try {
+        await c.saveWorldInfo(state.bookName, state.bookData, true);
+        state.dirty = false;
+        markDirty();
         return true;
+    } catch (e) {
+        log('saveWorldInfo 失败', e);
+        return false;
     }
-
-    return false;
 }
 
-function getScope() {
-    const popup = document.getElementById('world_popup');
-    if (popup) return popup;
-
-    const list = document.getElementById('world_popup_entries_list');
-    if (!list) return null;
-
-    let n = list;
-    for (let i = 0; i < 8 && n.parentElement; i++) {
-        n = n.parentElement;
-        const idc = ((n.id || '') + ' ' + (n.getAttribute('class') || '')).toLowerCase();
-        if (idc.includes('world')) return n;
-    }
-    return list.parentElement || list;
-}
-
-function collectCandidateInputs() {
-    const scope = getScope() || document.body;
-
-    let list = Array.from(scope.querySelectorAll('textarea, input, [contenteditable]')).filter(isEditable);
-
-    if (!list.length) {
-        list = Array.from(document.querySelectorAll('textarea, input, [contenteditable]')).filter(isEditable);
-    }
-
-    return list;
-}
-
-// ---------- uid 提取 ----------
-function extractUid(el) {
-    const own = el.getAttribute('uid') || el.getAttribute('data-uid');
-    if (own) return own;
-
-    const id = el.id || '';
-    const m = id.match(/world_entry_(?:content|key|comment|title)_(.+)$/i);
-    if (m) return m[1];
-
-    let n = el.parentElement;
-    let depth = 0;
-    while (n && depth < 15) {
-        if (n.getAttribute) {
-            const u = n.getAttribute('uid') || n.getAttribute('data-uid');
-            if (u) return u;
+function toast(msg) {
+    try {
+        const c = getCtx();
+        if (c && c.callGenericPopup) {
+            // 轻提示用 popup 太重，这里用 console + 自绘
         }
-        n = n.parentElement;
-        depth++;
+    } catch (e) { /* ignore */ }
+
+    let el = document.getElementById('wb-toast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'wb-toast';
+        document.body.appendChild(el);
     }
-    return null;
-}
-
-// ---------- 字段识别 ----------
-function heuristicField(el) {
-    const len = readVal(el).length;
-
-    if (el.tagName === 'INPUT') {
-        const t = (el.type || 'text').toLowerCase();
-        if (t === 'number' || t === 'tel') return 'ignore';
-        return 'comment';
-    }
-
-    // textarea 和 contenteditable 都按长度判断
-    return len >= 150 ? 'content' : 'key';
-}
-
-function guessField(el) {
-    const name = (el.getAttribute('name') || '').toLowerCase();
-    const id = (el.id || '').toLowerCase();
-    const cls = (el.getAttribute('class') || '').toLowerCase();
-
-    if (name === 'comment') return 'comment';
-    if (name === 'key' || name === 'keys') return 'key';
-    if (name === 'content') return 'content';
-
-    if (IGNORE_NAMES.includes(name) || IGNORE_NAMES.includes(id)) return 'ignore';
-    if (id.startsWith('wb-') || cls.includes('wb-edit-field')) return 'ignore';
-
-    if (id.includes('world_entry_content') || cls.includes('world_entry_content')) return 'content';
-    if (id.includes('world_entry_key') || cls.includes('world_entry_key')) return 'key';
-    if (id.includes('world_entry_comment') || id.includes('world_entry_title') || cls.includes('world_entry_name')) return 'comment';
-
-    const hay = [
-        name,
-        id,
-        cls,
-        el.getAttribute('placeholder'),
-        el.getAttribute('data-placeholder'),
-        el.getAttribute('data-field'),
-        el.getAttribute('data-name'),
-    ].filter(Boolean).join(' ').toLowerCase();
-
-    if (hay) {
-        for (const [field, hints] of Object.entries(FIELD_HINTS)) {
-            if (hints.some(h => hay.includes(h))) return field;
-        }
-    }
-
-    return heuristicField(el);
-}
-
-// ---------- 分组 ----------
-function buildGroups() {
-    const inputs = collectCandidateInputs();
-    if (!inputs.length) return [];
-
-    const map = new Map();
-    let lastUid = null;
-
-    inputs.forEach((el, idx) => {
-        let uid = extractUid(el);
-        if (uid) {
-            lastUid = uid;
-        } else {
-            uid = lastUid;
-        }
-        if (!uid) uid = '__g' + idx;
-
-        if (!map.has(uid)) map.set(uid, { uid, inputs: [], first: idx });
-        map.get(uid).inputs.push(el);
-    });
-
-    const groups = Array.from(map.values()).sort((a, b) => a.first - b.first);
-
-    groups.forEach(g => {
-        g.node =
-            document.querySelector(`.world_entry[uid="${CSS.escape(g.uid)}"]`) ||
-            document.querySelector(`.world_entry[data-uid="${CSS.escape(g.uid)}"]`) ||
-            null;
-
-        if (!g.node) {
-            let n = g.inputs[0];
-            let d = 0;
-            while (n && d < 15) {
-                if (n.classList && n.classList.contains('world_entry')) {
-                    g.node = n;
-                    break;
-                }
-                n = n.parentElement;
-                d++;
-            }
-        }
-    });
-
-    return groups;
-}
-
-// ---------- 收集文本 ----------
-function collectEntry(group) {
-    const buckets = { comment: [], key: [], content: [], other: [] };
-
-    group.inputs.forEach(el => {
-        const v = readVal(el).trim();
-        if (!v) return;
-        const f = guessField(el);
-        if (f === 'ignore') return;
-        (f && buckets[f] ? buckets[f] : buckets.other).push(v);
-    });
-
-    const node = group.node;
-    const text = node ? (node.textContent || '').replace(/\s+/g, ' ').trim() : '';
-    const other = buckets.other.join('\n');
-
-    const all = [
-        buckets.comment.join('\n'),
-        buckets.key.join('\n'),
-        buckets.content.join('\n'),
-        other,
-    ].filter(Boolean).join('\n');
-
-    return {
-        comment: [buckets.comment.join('\n') || all, other, text].filter(Boolean).join('\n'),
-        key: [buckets.key.join('\n') || all, other, text].filter(Boolean).join('\n'),
-        content: [buckets.content.join('\n') || all, other, text].filter(Boolean).join('\n'),
-    };
-}
-
-function getFieldText(group, field) {
-    return collectEntry(group)[field] || '';
-}
-
-function getEntryName(group) {
-    for (const el of group.inputs) {
-        if (guessField(el) === 'comment' && readVal(el).trim()) {
-            return readVal(el).trim().slice(0, 60);
-        }
-    }
-    for (const el of group.inputs) {
-        if (guessField(el) !== 'ignore' && readVal(el).trim()) {
-            return readVal(el).trim().slice(0, 60);
-        }
-    }
-    return group.uid ? `条目 #${group.uid}` : '未命名条目';
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
 // ---------- 片段 ----------
 function findSnippets(text, kw, radius, max) {
     const out = [];
-    const flat = text.replace(/\s+/g, ' ');
+    const flat = String(text).replace(/\s+/g, ' ');
     const lower = flat.toLowerCase();
     const k = kw.toLowerCase();
     if (!k) return out;
@@ -454,85 +340,74 @@ function renderSnippet(sn, field) {
 }
 
 // ---------- 编辑区 ----------
-function buildEditor(group) {
+function buildEditor(entry) {
     const body = document.createElement('div');
     body.className = 'wb-result-body';
 
     const editor = document.createElement('div');
     editor.className = 'wb-editor';
 
-    const groups = new Map();
-    group.inputs.forEach(el => {
-        const f = guessField(el);
-        if (f === 'ignore') return;
-        const key = f || 'other';
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(el);
-    });
-
-    let count = 0;
-
     FIELD_ORDER.forEach(f => {
-        const els = groups.get(f);
-        if (!els || !els.length) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'wb-edit-group';
 
-        els.forEach((el, i) => {
-            count++;
-            const wrap = document.createElement('div');
-            wrap.className = 'wb-edit-group';
+        const lab = document.createElement('div');
+        lab.className = 'wb-editor-label';
+        lab.textContent = FIELD_LABELS[f];
+        wrap.appendChild(lab);
 
-            const lab = document.createElement('div');
-            lab.className = 'wb-editor-label';
-            lab.textContent = (FIELD_LABELS[f] || f) + (els.length > 1 ? ` #${i + 1}` : '');
-            wrap.appendChild(lab);
+        const isContent = f === 'content';
+        const field = document.createElement(isContent ? 'textarea' : 'input');
+        field.className = 'wb-edit-field';
+        if (isContent) {
+            const len = fieldTextOf(entry, f).length;
+            field.rows = Math.min(14, Math.max(4, Math.ceil(len / 50)));
+        } else {
+            field.type = 'text';
+        }
+        field.value = fieldTextOf(entry, f);
+        field.spellcheck = false;
 
-            const isArea = el.tagName === 'TEXTAREA' || el.isContentEditable;
-            const field = document.createElement(isArea ? 'textarea' : 'input');
-            field.className = 'wb-edit-field';
-            if (isArea) {
-                const len = readVal(el).length;
-                field.rows = Math.min(12, Math.max(3, Math.ceil(len / 55)));
-            } else {
-                field.type = 'text';
-            }
-            field.value = readVal(el);
-            field.spellcheck = false;
-
-            field.addEventListener('input', () => {
-                writeVal(el, field.value);
-            });
-
-            wrap.appendChild(field);
-            editor.appendChild(wrap);
+        field.addEventListener('input', () => {
+            setFieldValue(entry, f, field.value);
         });
-    });
 
-    if (count === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'wb-hint';
-        empty.textContent = '这个条目没有可编辑的内容框 🥲';
-        editor.appendChild(empty);
-    }
+        wrap.appendChild(field);
+        editor.appendChild(wrap);
+    });
 
     body.appendChild(editor);
     return body;
 }
 
 // ---------- 搜索 ----------
-function runSearch() {
-    const groups = buildGroups();
-    const kw = searchText.trim();
-    const fields = Object.keys(activeFields).filter(f => activeFields[f]);
-
+async function runSearch() {
     const resultsBox = document.getElementById('wb-search-results');
     const counter = document.getElementById('wb-search-count');
     if (!resultsBox) return;
+
+    const data = await loadBook(false);
+
+    if (!data) {
+        resultsBox.innerHTML = '';
+        resultsBox.style.display = 'flex';
+        const warn = document.createElement('div');
+        warn.className = 'wb-empty';
+        warn.textContent = '读不到世界书数据 😿 请确认已打开某本世界书';
+        resultsBox.appendChild(warn);
+        if (counter) counter.textContent = '—';
+        return;
+    }
+
+    const entries = getEntries();
+    const kw = searchText.trim();
+    const fields = FIELD_ORDER.filter(f => activeFields[f]);
 
     resultsBox.innerHTML = '';
 
     if (!kw) {
         resultsBox.style.display = 'none';
-        if (counter) counter.textContent = `共 ${groups.length} 条`;
+        if (counter) counter.textContent = `共 ${entries.length} 条`;
         return;
     }
 
@@ -540,13 +415,13 @@ function runSearch() {
     let hits = 0;
     let rendered = 0;
 
-    for (const group of groups) {
+    for (const entry of entries) {
         const matchedFields = [];
         const texts = {};
 
         for (const f of fields) {
-            const t = getFieldText(group, f);
-            if (t.toLowerCase().includes(kwLower)) {
+            const t = fieldTextOf(entry, f);
+            if (t && t.toLowerCase().includes(kwLower)) {
                 matchedFields.push(f);
                 texts[f] = t;
             }
@@ -558,13 +433,13 @@ function runSearch() {
         if (rendered >= MAX_RESULTS) continue;
         rendered++;
 
-        resultsBox.appendChild(buildResultItem(group, matchedFields, texts, kw));
+        resultsBox.appendChild(buildResultItem(entry, matchedFields, texts, kw));
     }
 
     resultsBox.style.display = 'flex';
 
     if (counter) {
-        counter.textContent = `命中 ${hits} / ${groups.length}`;
+        counter.textContent = `命中 ${hits} / ${entries.length}`;
         counter.title = rendered < hits ? `结果过多，只显示前 ${rendered} 条` : '';
     }
 
@@ -581,8 +456,8 @@ function runSearch() {
     }
 }
 
-function buildResultItem(group, matchedFields, texts, kw) {
-    const uid = group.uid;
+function buildResultItem(entry, matchedFields, texts, kw) {
+    const uid = String(entry.uid);
     const item = document.createElement('div');
     item.className = 'wb-result-item';
     item.dataset.uid = uid;
@@ -596,7 +471,7 @@ function buildResultItem(group, matchedFields, texts, kw) {
 
     const name = document.createElement('span');
     name.className = 'wb-result-name';
-    name.textContent = getEntryName(group);
+    name.textContent = entry.comment ? String(entry.comment).slice(0, 60) : `条目 #${uid}`;
     head.appendChild(name);
 
     const tags = document.createElement('span');
@@ -610,7 +485,7 @@ function buildResultItem(group, matchedFields, texts, kw) {
     locate.textContent = '⌖';
     locate.addEventListener('click', e => {
         e.stopPropagation();
-        jumpToEntry(group);
+        jumpToEntry(uid);
     });
     head.appendChild(locate);
 
@@ -633,7 +508,7 @@ function buildResultItem(group, matchedFields, texts, kw) {
 
     if (expandedUids.has(uid)) {
         item.classList.add('expanded');
-        item.appendChild(buildEditor(group));
+        item.appendChild(buildEditor(entry));
     }
 
     head.addEventListener('click', () => {
@@ -644,7 +519,7 @@ function buildResultItem(group, matchedFields, texts, kw) {
         } else {
             expandedUids.add(uid);
             item.classList.add('expanded');
-            item.appendChild(buildEditor(group));
+            item.appendChild(buildEditor(entry));
         }
     });
 
@@ -652,13 +527,11 @@ function buildResultItem(group, matchedFields, texts, kw) {
 }
 
 // ---------- 定位 ----------
-function jumpToEntry(group) {
-    let node = group.node;
-    if (!node) {
-        node =
-            document.querySelector(`.world_entry[uid="${CSS.escape(group.uid)}"]`) ||
-            document.querySelector(`.world_entry[data-uid="${CSS.escape(group.uid)}"]`);
-    }
+function jumpToEntry(uid) {
+    const node =
+        document.querySelector(`.world_entry[uid="${CSS.escape(uid)}"]`) ||
+        document.querySelector(`.world_entry[data-uid="${CSS.escape(uid)}"]`);
+
     if (!node) return;
 
     node.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -669,31 +542,27 @@ function jumpToEntry(group) {
 }
 
 // ---------- 批量替换 ----------
-function doReplace(replacement) {
+async function doReplace(replacement) {
     const kw = searchText.trim();
     if (!kw) return alert('先在上面输入要搜索的关键词哦～');
 
-    const groups = buildGroups();
+    const data = await loadBook(false);
+    if (!data) return alert('读不到世界书数据 😿');
+
+    const entries = getEntries();
+    const fields = FIELD_ORDER.filter(f => activeFields[f]);
     const re = new RegExp(escapeRegExp(kw), 'gi');
 
     let affectedEntries = 0;
     let affectedFields = 0;
 
-    groups.forEach(group => {
+    entries.forEach(entry => {
         let touched = false;
-        group.inputs.forEach(el => {
-            const v = readVal(el);
+        fields.forEach(f => {
+            const v = fieldTextOf(entry, f);
             if (!v) return;
-
-            const f = guessField(el);
-            if (f === 'ignore') return;
-
-            const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
-            if (!shouldTouch) return;
-
             re.lastIndex = 0;
             if (!re.test(v)) return;
-
             affectedFields++;
             touched = true;
         });
@@ -702,71 +571,49 @@ function doReplace(replacement) {
 
     if (affectedFields === 0) return alert('没有找到可以替换的地方～');
 
-    if (!confirm(`将会修改 ${affectedEntries} 个条目里的 ${affectedFields} 处：\n「${kw}」 → 「${replacement}」\n\n只影响当前打开的世界书，确定继续吗？`)) return;
+    if (!confirm(`将会修改 ${affectedEntries} 个条目里的 ${affectedFields} 处：\n「${kw}」 → 「${replacement}」\n\n确定继续吗？`)) return;
 
-    groups.forEach(group => {
-        group.inputs.forEach(el => {
-            const v = readVal(el);
+    entries.forEach(entry => {
+        fields.forEach(f => {
+            const v = fieldTextOf(entry, f);
             if (!v) return;
-
-            const f = guessField(el);
-            if (f === 'ignore') return;
-
-            const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
-            if (!shouldTouch) return;
-
             re.lastIndex = 0;
             if (!re.test(v)) return;
             re.lastIndex = 0;
-
-            writeVal(el, v.replace(re, replacement));
+            setFieldValue(entry, f, v.replace(re, replacement));
         });
     });
 
-    alert('替换完成啦～记得点一下世界书面板的保存按钮确认哦 ✅');
+    await saveBook();
+    toast('替换完成并已保存 ✅');
     runSearch();
 }
 
 // ---------- 诊断 ----------
 function buildDiagnostics() {
     const lines = [];
-    const scope = getScope();
-    const groups = buildGroups();
+    const c = getCtx();
 
     lines.push('=== 环境 ===');
-    lines.push(`#world_popup: ${document.getElementById('world_popup') ? '有' : '无'}`);
-    lines.push(`#world_popup_entries_list: ${document.getElementById('world_popup_entries_list') ? '有' : '无'}`);
-    lines.push(`scope: ${scope ? (scope.id || scope.getAttribute('class') || scope.tagName) : 'null'}`);
+    lines.push(`SillyTavern.getContext: ${c ? '可用' : '不可用'}`);
+    lines.push(`context.loadWorldInfo: ${c && typeof c.loadWorldInfo === 'function' ? '有' : '无'}`);
+    lines.push(`context.saveWorldInfo: ${c && typeof c.saveWorldInfo === 'function' ? '有' : '无'}`);
+    lines.push(`#world_editor_select: ${document.getElementById('world_editor_select') ? '有' : '无'}`);
+    lines.push(`当前世界书名: ${getCurrentBookName() || '(未选中)'}`);
 
-    const allEditable = collectCandidateInputs();
-    lines.push(`候选可编辑元素总数: ${allEditable.length}`);
-    lines.push(`  其中 textarea: ${allEditable.filter(e => e.tagName === 'TEXTAREA').length}`);
-    lines.push(`  其中 input: ${allEditable.filter(e => e.tagName === 'INPUT').length}`);
-    lines.push(`  其中 contenteditable: ${allEditable.filter(e => e.isContentEditable).length}`);
-
+    const entries = getEntries();
     lines.push('');
-    lines.push(`=== 分组（共 ${groups.length} 组）===`);
+    lines.push(`=== 数据（共 ${entries.length} 条）===`);
 
-    groups.slice(0, 3).forEach((g, i) => {
-        lines.push(`[${i}] uid=${g.uid} 元素=${g.inputs.length} 有原生节点=${g.node ? '是' : '否'}`);
-        g.inputs.forEach((el, j) => {
-            const nm = el.getAttribute('name') || '';
-            const id = el.id || '';
-            const cls = (el.getAttribute('class') || '').slice(0, 40);
-            const kind = el.isContentEditable ? 'div[contenteditable]' : el.tagName.toLowerCase();
-            const val = readVal(el);
-            lines.push(`    ${j + 1}. <${kind}> name="${nm}" id="${id}" class="${cls}"`);
-            lines.push(`        字段=${guessField(el)} 长度=${val.length} 预览: ${val.slice(0, 40).replace(/\n/g, ' ')}`);
-        });
+    entries.slice(0, 3).forEach((e, i) => {
+        lines.push(`[${i}] uid=${e.uid}`);
+        lines.push(`    comment: ${String(e.comment || '').slice(0, 40)} (${String(e.comment || '').length} 字)`);
+        lines.push(`    key: ${fieldTextOf(e, 'key').slice(0, 60)} (${fieldTextOf(e, 'key').length} 字)`);
+        lines.push(`    content: ${String(e.content || '').slice(0, 40).replace(/\n/g, ' ')} (${String(e.content || '').length} 字)`);
     });
 
-    lines.push('');
-    lines.push('=== 收集结果长度（第一组）===');
-    if (groups[0]) {
-        const c = collectEntry(groups[0]);
-        Object.keys(c).forEach(k => lines.push(`  ${k}: ${c[k].length}`));
-    } else {
-        lines.push('  （没有分组）');
+    if (entries.length === 0) {
+        lines.push('（没有读到条目 —— 可能是世界书没打开，或 loadWorldInfo 失败）');
     }
 
     return lines.join('\n');
