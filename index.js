@@ -3,11 +3,21 @@ import { eventSource, event_types } from '../../../../script.js';
 const MODULE_NAME = 'worldbook-search';
 const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 
-// ---------- 字段识别 ----------
-const FIELD_HINTS = {
-    comment: ['comment', '备注', '标题', '备忘录', 'title'],
-    key: ['key', 'keys', '关键词', '关键字', '触发'],
-    content: ['content', '内容', '正文'],
+// ============================================================
+// 依据 SillyTavern 官方源码（public/scripts/world-info.js）：
+//   - 条目容器：.world_entry[uid]
+//   - 表单容器：.world_entry_form
+//   - 字段：
+//       <textarea name="comment">  备注
+//       <textarea name="key">      关键词
+//       <textarea name="content" id="world_entry_content_${uid}">  内容
+//   - 内容框的 uid 也会存在 jQuery data 里（HTML 上不一定有）
+// ============================================================
+
+const FIELD_NAMES = {
+    comment: 'comment',
+    key: 'key',
+    content: 'content',
 };
 
 const FIELD_LABELS = {
@@ -20,7 +30,7 @@ const FIELD_LABELS = {
 const FIELD_ORDER = ['comment', 'key', 'content', 'other'];
 
 const IGNORE_TYPES = ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'hidden', 'image'];
-const IGNORE_NAMES = ['depth', 'order', 'probability', 'weight', 'position', 'index', 'uid', 'scan_depth', 'token_budget'];
+const IGNORE_NAMES = ['depth', 'order', 'probability', 'weight', 'position', 'index', 'uid', 'scan_depth', 'token_budget', 'role', 'group_weight', 'sticky', 'cooldown', 'delay'];
 
 const MAX_RESULTS = 300;
 const MAX_SNIPPETS_PER_ENTRY = 3;
@@ -32,7 +42,7 @@ const expandedUids = new Set();
 
 // ---------- 入口 ----------
 jQuery(async () => {
-    log('v2.2.0 加载中...');
+    log('v2.3.0 加载中...');
 
     setInterval(tryInject, 800);
 
@@ -152,31 +162,20 @@ function injectUI(entriesContainer) {
     log('UI 注入完成 ✨');
 }
 
-// ---------- 找到世界书面板的根容器 ----------
-function getPanelRoot() {
-    const list = document.getElementById('world_popup_entries_list');
-    if (!list) return null;
+// ---------- uid 提取（多路） ----------
+function extractUid(el) {
+    const own = el.getAttribute('uid') || el.getAttribute('data-uid');
+    if (own) return own;
 
-    const base = list.querySelectorAll('textarea, input').length;
-    let node = list;
+    const id = el.id || '';
+    const m = id.match(/world_entry_(?:content|key|comment|title)_(.+)$/i);
+    if (m) return m[1];
 
-    for (let i = 0; i < 5; i++) {
-        const p = node.parentElement;
-        if (!p || p === document.body || p === document.documentElement) break;
-        const cnt = p.querySelectorAll('textarea, input').length;
-        if (cnt > base) return p;
-        node = p;
-    }
-    return list;
-}
-
-// ---------- 找元素所属的 uid ----------
-function findUid(el, root) {
-    let n = el;
+    let n = el.parentElement;
     let depth = 0;
-    while (n && n !== root && depth < 12) {
+    while (n && depth < 15) {
         if (n.getAttribute) {
-            const u = n.getAttribute('uid');
+            const u = n.getAttribute('uid') || n.getAttribute('data-uid');
             if (u) return u;
         }
         n = n.parentElement;
@@ -185,19 +184,60 @@ function findUid(el, root) {
     return null;
 }
 
-// ---------- 分组：按 uid 把输入框归到条目 ----------
-function buildGroups() {
-    const root = getPanelRoot();
-    if (!root) return [];
+// ---------- 收集候选输入框 ----------
+function isInOwnPanel(el) {
+    const panel = document.getElementById('wb-search-panel');
+    return !!(panel && panel.contains(el));
+}
 
-    const nodes = Array.from(root.querySelectorAll('textarea, input'))
-        .filter(el => !IGNORE_TYPES.includes((el.type || '').toLowerCase()));
+function isUsable(el) {
+    if (isInOwnPanel(el)) return false;
+    const t = (el.type || '').toLowerCase();
+    return !IGNORE_TYPES.includes(t);
+}
+
+function getScope() {
+    const popup = document.getElementById('world_popup');
+    if (popup) return popup;
+
+    const list = document.getElementById('world_popup_entries_list');
+    if (!list) return null;
+
+    let n = list;
+    for (let i = 0; i < 8 && n.parentElement; i++) {
+        n = n.parentElement;
+        const idc = ((n.id || '') + ' ' + (n.className || '')).toLowerCase();
+        if (idc.includes('world')) return n;
+    }
+    return list.parentElement || list;
+}
+
+function collectCandidateInputs() {
+    const all = Array.from(document.querySelectorAll('textarea, input')).filter(isUsable);
+
+    // 第一优先：世界书标准 name（comment / key / content）
+    const named = all.filter(el => {
+        const n = (el.getAttribute('name') || '').toLowerCase();
+        return n === 'comment' || n === 'key' || n === 'keys' || n === 'content';
+    });
+    if (named.length > 0) return named;
+
+    // 兜底：在 scope 内扫全部输入框
+    const scope = getScope();
+    if (!scope) return [];
+    return Array.from(scope.querySelectorAll('textarea, input')).filter(isUsable);
+}
+
+// ---------- 分组 ----------
+function buildGroups() {
+    const inputs = collectCandidateInputs();
+    if (!inputs.length) return [];
 
     const map = new Map();
     let lastUid = null;
 
-    nodes.forEach((el, idx) => {
-        let uid = findUid(el, root);
+    inputs.forEach((el, idx) => {
+        let uid = extractUid(el);
         if (uid) {
             lastUid = uid;
         } else {
@@ -211,18 +251,30 @@ function buildGroups() {
 
     const groups = Array.from(map.values()).sort((a, b) => a.first - b.first);
 
-    const entryNodes = new Map();
-    root.querySelectorAll('.world_entry[uid]').forEach(e => {
-        entryNodes.set(e.getAttribute('uid'), e);
-    });
     groups.forEach(g => {
-        g.node = entryNodes.get(g.uid) || null;
+        g.node =
+            document.querySelector(`.world_entry[uid="${CSS.escape(g.uid)}"]`) ||
+            document.querySelector(`.world_entry[data-uid="${CSS.escape(g.uid)}"]`) ||
+            null;
+
+        if (!g.node) {
+            let n = g.inputs[0];
+            let d = 0;
+            while (n && d < 15) {
+                if (n.classList && n.classList.contains('world_entry')) {
+                    g.node = n;
+                    break;
+                }
+                n = n.parentElement;
+                d++;
+            }
+        }
     });
 
     return groups;
 }
 
-// ---------- 字段猜测 ----------
+// ---------- 字段识别 ----------
 function heuristicField(el) {
     const tag = el.tagName;
 
@@ -244,7 +296,15 @@ function guessField(el) {
     const name = (el.getAttribute('name') || '').toLowerCase();
     const id = (el.id || '').toLowerCase();
 
+    if (name === 'comment') return 'comment';
+    if (name === 'key' || name === 'keys') return 'key';
+    if (name === 'content') return 'content';
+
     if (IGNORE_NAMES.includes(name) || IGNORE_NAMES.includes(id)) return 'ignore';
+
+    if (id.includes('world_entry_content')) return 'content';
+    if (id.includes('world_entry_key')) return 'key';
+    if (id.includes('world_entry_comment') || id.includes('world_entry_title')) return 'comment';
 
     const hay = [
         name,
@@ -255,7 +315,11 @@ function guessField(el) {
     ].filter(Boolean).join(' ').toLowerCase();
 
     if (hay) {
-        for (const [field, hints] of Object.entries(FIELD_HINTS)) {
+        for (const [field, hints] of Object.entries({
+            comment: ['comment', '备注', '标题', '备忘录', 'title'],
+            key: ['key', 'keys', '关键词', '关键字', '触发'],
+            content: ['content', '内容', '正文'],
+        })) {
             if (hints.some(h => hay.includes(h))) return field;
         }
     }
@@ -263,7 +327,7 @@ function guessField(el) {
     return heuristicField(el);
 }
 
-// ---------- 收集条目的可搜索文本 ----------
+// ---------- 收集文本 ----------
 function collectEntry(group) {
     const buckets = { comment: [], key: [], content: [], other: [] };
 
@@ -561,11 +625,11 @@ function buildResultItem(group, matchedFields, texts, kw) {
 
 // ---------- 定位 ----------
 function jumpToEntry(group) {
-    const root = getPanelRoot();
     let node = group.node;
-
-    if (!node && root) {
-        node = root.querySelector(`.world_entry[uid="${CSS.escape(group.uid)}"]`);
+    if (!node) {
+        node =
+            document.querySelector(`.world_entry[uid="${CSS.escape(group.uid)}"]`) ||
+            document.querySelector(`.world_entry[data-uid="${CSS.escape(group.uid)}"]`);
     }
     if (!node) return;
 
@@ -640,26 +704,31 @@ function doReplace(replacement) {
 // ---------- 诊断 ----------
 function buildDiagnostics() {
     const lines = [];
-    const list = document.getElementById('world_popup_entries_list');
-    const root = getPanelRoot();
+    const scope = getScope();
     const groups = buildGroups();
 
-    lines.push('=== 容器 ===');
-    lines.push(`#world_popup_entries_list: ${list ? '存在' : '不存在'}`);
-    lines.push(`root: ${root ? (root.id || root.className || root.tagName) : 'null'}`);
-    lines.push(`root 内 textarea/input 总数: ${root ? root.querySelectorAll('textarea, input').length : 0}`);
+    lines.push('=== 环境 ===');
+    lines.push(`#world_popup: ${document.getElementById('world_popup') ? '有' : '无'}`);
+    lines.push(`#world_popup_entries_list: ${document.getElementById('world_popup_entries_list') ? '有' : '无'}`);
+    lines.push(`scope: ${scope ? (scope.id || scope.className || scope.tagName) : 'null'}`);
+
+    const named = Array.from(document.querySelectorAll('textarea, input')).filter(el => {
+        const n = (el.getAttribute('name') || '').toLowerCase();
+        return n === 'comment' || n === 'key' || n === 'keys' || n === 'content';
+    });
+    lines.push(`全局 name=comment/key/content 的输入框: ${named.length}`);
 
     lines.push('');
     lines.push(`=== 分组（共 ${groups.length} 组）===`);
 
-    groups.slice(0, 3).forEach((g, i) => {
+    groups.slice(0, 4).forEach((g, i) => {
         lines.push(`[${i}] uid=${g.uid} 输入框=${g.inputs.length} 有原生节点=${g.node ? '是' : '否'}`);
         g.inputs.forEach((el, j) => {
             const nm = el.getAttribute('name') || '';
-            const ph = el.getAttribute('placeholder') || '';
+            const id = el.id || '';
             const len = (el.value || '').length;
             const f = guessField(el);
-            lines.push(`    ${j + 1}. <${el.tagName.toLowerCase()}> name="${nm}" placeholder="${ph}"`);
+            lines.push(`    ${j + 1}. <${el.tagName.toLowerCase()}> name="${nm}" id="${id}"`);
             lines.push(`        字段=${f} 长度=${len} 预览: ${(el.value || '').slice(0, 40).replace(/\n/g, ' ')}`);
         });
     });
