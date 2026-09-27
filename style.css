@@ -1,0 +1,84 @@
+#wb-search-panel {
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 0.9em;
+}
+
+.wb-search-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+#wb-search-input {
+    flex: 1;
+    min-width: 120px;
+}
+
+.wb-mini-btn {
+    width: auto !important;
+    min-width: 0 !important;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.wb-search-count {
+    white-space: nowrap;
+    opacity: 0.75;
+    font-size: 0.85em;
+}
+
+.wb-search-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    opacity: 0.85;
+    user-select: none;
+}
+
+.wb-right {
+    margin-left: auto;
+}
+
+.wb-dim {
+    opacity: 0.6;
+    font-size: 0.85em;
+}
+
+#wb-replace-box summary {
+    cursor: pointer;
+    opacity: 0.75;
+    user-select: none;
+}
+
+/* 命中样式 */
+.world_entry.wb-search-hit {
+    box-shadow: inset 3px 0 0 var(--SmartThemeQuoteColor);
+    border-radius: 6px;
+}
+
+.wb-search-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeBodyColor);
+    margin: 4px 4px 4px 2px;
+    opacity: 0.9;
+}
+
+/* !important 才能盖住别人写的 inline style */
+.wb-search-hidden {
+    display: none !important;
+}
