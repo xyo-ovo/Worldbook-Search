@@ -3,20 +3,17 @@ import { eventSource, event_types } from '../../../../script.js';
 const MODULE_NAME = 'worldbook-search';
 const log = (...a) => console.log(`[${MODULE_NAME}]`, ...a);
 
-// ---------- 字段定义（多选择器兜底，兼容不同酒馆版本）----------
-const FIELDS = {
-    comment: {
-        label: '备注',
-        selectors: ['.world_entry_name', 'input[name="comment"]', 'textarea[name="comment"]'],
-    },
-    key: {
-        label: '关键词',
-        selectors: ['textarea[name="key"]', '.world_entry_key textarea', '[data-field="key"]'],
-    },
-    content: {
-        label: '内容',
-        selectors: ['textarea[name="content"]', '.world_entry_content textarea', '[data-field="content"]'],
-    },
+// ---------- 字段识别：靠 name / id / placeholder 里的关键词猜 ----------
+const FIELD_HINTS = {
+    comment: ['comment', '备注', '标题', 'title', 'name'],
+    key: ['key', 'keys', '关键词', '触发'],
+    content: ['content', '内容', '正文'],
+};
+
+const FIELD_LABELS = {
+    comment: '备注',
+    key: '关键词',
+    content: '内容',
 };
 
 // ---------- 状态 ----------
@@ -28,12 +25,13 @@ const activeFields = { comment: true, key: true, content: true };
 jQuery(async () => {
     log('插件加载中...');
 
-    // 世界书弹窗是动态出现的，轮询 + 事件双保险
     setInterval(tryInject, 800);
 
     if (event_types && event_types.WORLDINFO_SETTINGS_UPDATED) {
         eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => setTimeout(tryInject, 300));
     }
+
+    log('诊断命令：控制台输入 wbSearchDebug() 可打印条目结构');
 });
 
 function tryInject() {
@@ -42,7 +40,7 @@ function tryInject() {
 
     const panel = document.getElementById('wb-search-panel');
     if (panel) {
-        if (panel.parentNode === list.parentNode) return; // 位置正确，不用管
+        if (panel.parentNode === list.parentNode) return;
         panel.remove();
     }
     injectUI(list);
@@ -77,7 +75,6 @@ function injectUI(entriesContainer) {
 
     entriesContainer.parentNode.insertBefore(panel, entriesContainer);
 
-    // ---- 搜索框 ----
     const input = panel.querySelector('#wb-search-input');
     input.addEventListener('input', debounce(() => {
         searchText = input.value;
@@ -91,7 +88,6 @@ function injectUI(entriesContainer) {
         input.focus();
     });
 
-    // ---- 范围勾选 ----
     ['comment', 'key', 'content'].forEach(f => {
         panel.querySelector(`#wb-f-${f}`).addEventListener('change', e => {
             activeFields[f] = e.target.checked;
@@ -99,18 +95,15 @@ function injectUI(entriesContainer) {
         });
     });
 
-    // ---- 只显示匹配 ----
     panel.querySelector('#wb-only-match').addEventListener('change', e => {
         onlyShowMatches = e.target.checked;
         runSearch();
     });
 
-    // ---- 批量替换 ----
     panel.querySelector('#wb-replace-btn').addEventListener('click', () => {
         doReplace(panel.querySelector('#wb-replace-input').value);
     });
 
-    // ---- 切换世界书时重新搜 ----
     const sel = document.getElementById('world_editor_select');
     if (sel && !sel.dataset.wbSearchBound) {
         sel.addEventListener('change', () => setTimeout(runSearch, 300));
@@ -121,35 +114,66 @@ function injectUI(entriesContainer) {
     log('UI 注入完成 ✨');
 }
 
-// ---------- 取条目 ----------
+// ---------- 条目 & 字段收集 ----------
 function getEntries() {
     return Array.from(document.querySelectorAll('#world_popup_entries_list .world_entry'));
 }
 
-function getFieldEl(entry, field) {
-    for (const sel of FIELDS[field].selectors) {
-        const el = entry.querySelector(sel);
-        if (el) return el;
+function collectInputs(entry) {
+    return Array.from(entry.querySelectorAll('textarea, input'))
+        .filter(el => el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'button' && el.type !== 'submit');
+}
+
+function guessField(el) {
+    const hay = [
+        el.getAttribute('name'),
+        el.id,
+        el.getAttribute('placeholder'),
+        el.getAttribute('data-field'),
+        el.getAttribute('data-name'),
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    if (!hay) return null;
+
+    for (const [field, hints] of Object.entries(FIELD_HINTS)) {
+        if (hints.some(h => hay.includes(h))) return field;
     }
     return null;
 }
 
+function collectEntry(entry) {
+    const buckets = { comment: [], key: [], content: [], other: [] };
+
+    collectInputs(entry).forEach(el => {
+        const v = (el.value || '').trim();
+        if (!v) return;
+        const f = guessField(el);
+        (f && buckets[f] ? buckets[f] : buckets.other).push(v);
+    });
+
+    const text = (entry.textContent || '').replace(/\s+/g, ' ').trim();
+    const other = buckets.other.join('\n');
+
+    return {
+        comment: [buckets.comment.join('\n'), other, text].filter(Boolean).join('\n'),
+        key: [buckets.key.join('\n'), other, text].filter(Boolean).join('\n'),
+        content: [buckets.content.join('\n'), other, text].filter(Boolean).join('\n'),
+        all: [buckets.comment, buckets.key, buckets.content, buckets.other, text].flat().join('\n'),
+    };
+}
+
 function getFieldText(entry, field) {
-    const el = getFieldEl(entry, field);
-    if (!el) return '';
-    if (typeof el.value === 'string') return el.value;
-    return el.textContent || '';
+    return collectEntry(entry)[field] || '';
 }
 
 // ---------- 搜索 ----------
 function runSearch() {
     const entries = getEntries();
     const kw = searchText.trim().toLowerCase();
-    const fields = Object.keys(FIELDS).filter(f => activeFields[f]);
+    const fields = Object.keys(FIELD_LABELS).filter(f => activeFields[f]);
     let hits = 0;
 
     entries.forEach(entry => {
-        // 清掉上一次的痕迹
         entry.classList.remove('wb-search-hit', 'wb-search-hidden');
         entry.querySelectorAll('.wb-search-badge').forEach(b => b.remove());
 
@@ -162,7 +186,7 @@ function runSearch() {
             entry.classList.add('wb-search-hit');
             const badge = document.createElement('span');
             badge.className = 'wb-search-badge';
-            badge.textContent = `🔍 ${matched.map(f => FIELDS[f].label).join(' / ')}`;
+            badge.textContent = `🔍 ${matched.map(f => FIELD_LABELS[f]).join(' / ')}`;
             entry.insertBefore(badge, entry.firstChild);
         } else if (onlyShowMatches) {
             entry.classList.add('wb-search-hidden');
@@ -180,22 +204,27 @@ function doReplace(replacement) {
     const kw = searchText.trim();
     if (!kw) return alert('先在上面输入要搜索的关键词哦～');
 
-    const fields = Object.keys(FIELDS).filter(f => activeFields[f]);
     const entries = getEntries();
+    const re = new RegExp(escapeRegExp(kw), 'gi');
 
-    // 先统计影响面
     let affectedEntries = 0;
     let affectedFields = 0;
+
     entries.forEach(entry => {
         let touched = false;
-        fields.forEach(f => {
-            const el = getFieldEl(entry, f);
-            if (!el) return;
-            const val = (typeof el.value === 'string' ? el.value : el.textContent) || '';
-            if (val.toLowerCase().includes(kw.toLowerCase())) {
-                affectedFields++;
-                touched = true;
-            }
+        collectInputs(entry).forEach(el => {
+            const v = el.value || '';
+            if (!v) return;
+
+            const f = guessField(el);
+            const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
+            if (!shouldTouch) return;
+
+            re.lastIndex = 0;
+            if (!re.test(v)) return;
+
+            affectedFields++;
+            touched = true;
         });
         if (touched) affectedEntries++;
     });
@@ -204,25 +233,20 @@ function doReplace(replacement) {
 
     if (!confirm(`将会修改 ${affectedEntries} 个条目里的 ${affectedFields} 处：\n「${kw}」 → 「${replacement}」\n\n只影响当前打开的世界书，确定继续吗？`)) return;
 
-    const re = new RegExp(escapeRegExp(kw), 'gi');
-
     entries.forEach(entry => {
-        fields.forEach(f => {
-            const el = getFieldEl(entry, f);
-            if (!el) return;
-            const isInput = typeof el.value === 'string';
-            const val = isInput ? el.value : el.textContent;
-            if (!val) return;
+        collectInputs(entry).forEach(el => {
+            const v = el.value || '';
+            if (!v) return;
+
+            const f = guessField(el);
+            const shouldTouch = f ? activeFields[f] : Object.values(activeFields).some(Boolean);
+            if (!shouldTouch) return;
 
             re.lastIndex = 0;
-            if (!re.test(val)) return;
+            if (!re.test(v)) return;
             re.lastIndex = 0;
 
-            const next = val.replace(re, replacement);
-            if (isInput) el.value = next;
-            else el.textContent = next;
-
-            // 通知酒馆同步数据
+            el.value = v.replace(re, replacement);
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
         });
@@ -231,6 +255,31 @@ function doReplace(replacement) {
     alert('替换完成啦～记得点一下世界书面板的保存按钮确认哦 ✅');
     runSearch();
 }
+
+// ---------- 诊断 ----------
+window.wbSearchDebug = function () {
+    const entries = getEntries();
+    log(`找到 ${entries.length} 个 .world_entry`);
+
+    const e = entries[0];
+    if (!e) return log('没有找到任何条目');
+
+    log('第一个条目的 outerHTML（截断 4000 字）:');
+    console.log(e.outerHTML.slice(0, 4000));
+
+    log('识别到的输入控件:');
+    console.table(collectInputs(e).map(el => ({
+        tag: el.tagName,
+        name: el.getAttribute('name'),
+        id: el.id,
+        placeholder: el.getAttribute('placeholder'),
+        猜测字段: guessField(el),
+        值: (el.value || '').slice(0, 40),
+    })));
+
+    log('收集到的字段文本:');
+    console.log(collectEntry(e));
+};
 
 // ---------- 工具 ----------
 function escapeRegExp(s) {
